@@ -189,8 +189,47 @@ html, body {
 }
 
 .control-dock.collapsed {
-    transform: translateX(-340px);
-    opacity: 0.2;
+    transform: translateX(-360px);
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* Floating Restore Button when Control Panel is Collapsed */
+.btn-expand-panel {
+    position: fixed;
+    top: 76px;
+    left: 18px;
+    z-index: 80;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: var(--panel-bg);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    border: 1px solid var(--panel-border);
+    border-radius: 20px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    color: var(--text-primary);
+    font-family: var(--font-main);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-expand-panel:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: var(--accent);
+    box-shadow: 0 0 16px var(--accent-glow);
+    transform: translateX(4px);
+    color: #fff;
+}
+
+.btn-expand-panel .expand-icon {
+    font-size: 11px;
+    color: var(--accent);
 }
 
 .dock-header {

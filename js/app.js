@@ -1118,6 +1118,10 @@ export class MandelbrotApp {
                 case 'H':
                     this.toggleZenMode();
                     break;
+                case 'p':
+                case 'P':
+                    this.toggleControlPanel();
+                    break;
                 case 'f':
                 case 'F':
                     this.toggleFullscreen();
@@ -1194,6 +1198,25 @@ export class MandelbrotApp {
 
         this.needsRender = true;
         this.showToast(`Palette: ${next.name}`);
+    }
+
+    toggleControlPanel(forceOpen = null) {
+        const controlPanel = document.getElementById('controlPanel');
+        const btnExpandPanel = document.getElementById('btnExpandPanel');
+        if (!controlPanel) return;
+
+        const isCurrentlyCollapsed = controlPanel.classList.contains('collapsed');
+        const shouldCollapse = forceOpen !== null ? !forceOpen : !isCurrentlyCollapsed;
+
+        if (shouldCollapse) {
+            controlPanel.classList.add('collapsed');
+            if (btnExpandPanel) btnExpandPanel.classList.remove('hidden');
+            this.showToast('Controls hidden (Press P or click Controls tab)');
+        } else {
+            controlPanel.classList.remove('collapsed');
+            if (btnExpandPanel) btnExpandPanel.classList.add('hidden');
+            this.showToast('Controls restored');
+        }
     }
 
     toggleZenMode() {
@@ -1414,12 +1437,24 @@ export class MandelbrotApp {
             });
         });
 
-        // Toggle panel collapse
+        // Toggle panel collapse / expand
         const btnCollapsePanel = document.getElementById('btnCollapsePanel');
-        const controlPanel = document.getElementById('controlPanel');
-        if (btnCollapsePanel && controlPanel) {
+        const btnExpandPanel = document.getElementById('btnExpandPanel');
+        const btnToggleControls = document.getElementById('btnToggleControls');
+
+        if (btnCollapsePanel) {
             btnCollapsePanel.addEventListener('click', () => {
-                controlPanel.classList.toggle('collapsed');
+                this.toggleControlPanel(false);
+            });
+        }
+        if (btnExpandPanel) {
+            btnExpandPanel.addEventListener('click', () => {
+                this.toggleControlPanel(true);
+            });
+        }
+        if (btnToggleControls) {
+            btnToggleControls.addEventListener('click', () => {
+                this.toggleControlPanel();
             });
         }
     }
