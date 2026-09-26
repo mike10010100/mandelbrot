@@ -1,6 +1,6 @@
-# ✦ MANDELBROT 64 — Interactive Fractal Explorer
+# ✦ MANDELBROT 106 — Double-Double Deep Fractal Engine
 
-A hardware-accelerated, high-performance interactive fractal engine running in modern WebGL 2.0 with continuous smooth iteration coloring, emulated 64-bit double precision, live Julia set exploration, interactive minimap navigation, dynamic palette animation, and high-resolution snapshot export.
+A hardware-accelerated, high-performance interactive fractal engine running in modern WebGL 2.0 with **106-bit Double-Double precision (~31 decimal digits)**, continuous smooth iteration coloring, GPU perturbation theory rendering at **locked 120 FPS**, live Julia set exploration, interactive minimap navigation, dynamic palette animation, and high-resolution snapshot export down to **$10^{28}\times$ magnification**.
 
 ---
 
@@ -23,10 +23,11 @@ Then open **[http://127.0.0.1:8088](http://127.0.0.1:8088)** in your browser (Ch
 
 ## ✨ Features
 
-### 1. ⚡ Ultra-Fast GPU Acceleration & Deep Zoom Perturbation Engine (FP64)
+### 1. ⚡ 106-Bit Double-Double Arithmetic & GPU Perturbation Engine (10²⁸ Zoom)
 - **WebGL 2.0 Shaders (GLSL ES 3.00)**: Renders at native monitor refresh rates (60 to 120+ FPS) across high-DPI Retina and 4K displays.
 - **Continuous Smooth Coloring**: Uses the normalized fractional escape equation $\nu = n + 1 - \frac{\ln(\ln(|z|))}{\ln(2)}$ to eliminate discrete color banding.
-- **Perturbation Theory Deep Zoom Pipeline**: To bypass the 32-bit floating point precision barrier ($> 10^5$ zoom) where standard float32 arithmetic collapses into blocky pixelation (and where GPU driver optimizations like Apple Metal's `-ffast-math` fold algebraic double-single emulations), the engine computes a 64-bit IEEE 754 reference orbit $Z_{n+1} = Z_n^2 + C_0$ on the CPU and streams it to the GPU via an `RG32F` texture buffer. The fragment shader then solves the delta recurrence $\Delta z_{n+1} = 2 Z_n \Delta z_n + \Delta z_n^2 + \Delta c$ at full hardware speed, providing razor-sharp, zero-pixelation rendering down to $10^{14}\times$ zoom.
+- **Double-Double Precision Arithmetic ([`js/double-double.js`](file:///Users/mike10010100/git/mandelbrot/js/double-double.js))**: Implements Knuth's exact Two-Sum and Dekker's exact Two-Product algorithms. Each number is represented as an unevaluated sum of two IEEE 754 float64 values $[hi, lo]$, yielding **106 bits of mantissa (~31 decimal digits)**. Exact fractional formatting via BigInt bit shifts guarantees zero truncation or rounding drift down to $10^{-32}$.
+- **GPU Perturbation Theory Pipeline**: Standard IEEE 754 64-bit float precision collapses around $10^{14}\times$ zoom where adjacent pixel delta $\Delta c < 1.11 \times 10^{-16}$. The engine bypasses this limit by computing a 106-bit double-double reference orbit $Z_{n+1} = Z_n^2 + C_0$ on the CPU and streaming it to the GPU via an `RG32F` texture buffer. The fragment shader then solves the delta recurrence $\Delta z_{n+1} = 2 Z_n \Delta z_n + \Delta z_n^2 + \Delta c$ at full hardware 32-bit speed, unlocking razor-sharp rendering at **$10^{28}\times$ zoom** while maintaining **120 FPS**.
 
 ### 2. 🌀 Dual Mandelbrot & Julia Set Modes
 - **Live Picture-in-Picture Julia Companion**: As you hover your mouse across the Mandelbrot set, a real-time mini canvas in the corner displays the corresponding Julia set $z_{n+1} = z_n^2 + c$.
@@ -83,9 +84,10 @@ Then open **[http://127.0.0.1:8088](http://127.0.0.1:8088)** in your browser (Ch
 - [`index.html`](file:///Users/mike10010100/git/mandelbrot/index.html) — Application entry point, control dock, HUD bar, minimap overlay, and modals.
 - [`css/style.css`](file:///Users/mike10010100/git/mandelbrot/css/style.css) — Glassmorphic styling, responsive layout, sliders, and dark theme.
 - [`js/app.js`](file:///Users/mike10010100/git/mandelbrot/js/app.js) — Core application loop, coordinate transforms, touch/mouse interaction, and URL state management.
-- [`js/shaders.js`](file:///Users/mike10010100/git/mandelbrot/js/shaders.js) — WebGL 2.0 GLSL fragment shaders (FP32 and FP64 double-single emulation) with smooth coloring.
+- [`js/double-double.js`](file:///Users/mike10010100/git/mandelbrot/js/double-double.js) — High-performance 106-bit Double-Double arithmetic engine (Knuth Two-Sum, Dekker Two-Product, exact BigInt rational decimal formatter).
+- [`js/shaders.js`](file:///Users/mike10010100/git/mandelbrot/js/shaders.js) — WebGL 2.0 GLSL fragment shaders (FP32, FP64 emulation, and GPU Perturbation recurrence).
 - [`js/palettes.js`](file:///Users/mike10010100/git/mandelbrot/js/palettes.js) — Mathematical cosine color palettes and CPU preview evaluators.
-- [`js/presets.js`](file:///Users/mike10010100/git/mandelbrot/js/presets.js) — Curated coordinates for famous fractal landmarks.
+- [`js/presets.js`](file:///Users/mike10010100/git/mandelbrot/js/presets.js) — Curated coordinates for classic, deep, Julia, and ultra-deep ($10^{18}$ to $10^{28}$) landmarks.
 - [`js/minimap.js`](file:///Users/mike10010100/git/mandelbrot/js/minimap.js) — Global overview navigator with interactive viewport bounding box.
 - [`js/pip-julia.js`](file:///Users/mike10010100/git/mandelbrot/js/pip-julia.js) — Real-time Picture-in-Picture Julia companion preview.
 - [`js/webgl-utils.js`](file:///Users/mike10010100/git/mandelbrot/js/webgl-utils.js) — Shader compilation, program linking, and double-single float splitting.

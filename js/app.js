@@ -5,6 +5,7 @@ import { VERTEX_SHADER, FRAGMENT_SHADER_SINGLE, FRAGMENT_SHADER_DOUBLE, FRAGMENT
 import { createProgram, setupQuad, splitFloat } from './webgl-utils.js';
 import { Minimap } from './minimap.js';
 import { PipJulia } from './pip-julia.js';
+import { dd_add, dd_sub, dd_mul, dd_sqr, dd_set, dd_from_string, dd_to_string } from './double-double.js';
 
 export class MandelbrotApp {
     constructor() {
@@ -20,10 +21,12 @@ export class MandelbrotApp {
             return;
         }
 
-        // State
+        // State (Dual Float64 and 106-bit Double-Double Coordinates)
         this.state = {
             centerX: -0.65,
             centerY: 0.0,
+            centerDD_x: [-0.65, 0.0],
+            centerDD_y: [0.0, 0.0],
             zoom: 0.85,
             maxIterations: 250,
             autoIterations: true,
@@ -54,6 +57,8 @@ export class MandelbrotApp {
         this.isDragging = false;
         this.dragStart = { x: 0, y: 0 };
         this.centerAtDragStart = { x: 0, y: 0 };
+        this.centerAtDragStartDD_x = [-0.65, 0.0];
+        this.centerAtDragStartDD_y = [0.0, 0.0];
         this.momentum = { vx: 0, vy: 0 };
         this.lastPointerPos = { x: 0, y: 0 };
         this.lastPointerTime = 0;
@@ -84,6 +89,27 @@ export class MandelbrotApp {
         const modal = document.getElementById('fallbackModal');
         if (modal) modal.classList.remove('hidden');
         console.error('WebGL 2.0 is required but not supported on this device/browser.');
+    }
+
+    setCenter(x, y) {
+        if (Array.isArray(x)) {
+            this.state.centerDD_x = [x[0], x[1]];
+        } else if (typeof x === 'string') {
+            this.state.centerDD_x = dd_from_string(x);
+        } else {
+            this.state.centerDD_x = dd_set(x);
+        }
+
+        if (Array.isArray(y)) {
+            this.state.centerDD_y = [y[0], y[1]];
+        } else if (typeof y === 'string') {
+            this.state.centerDD_y = dd_from_string(y);
+        } else {
+            this.state.centerDD_y = dd_set(y);
+        }
+
+        this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
+        this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
     }
 
     initWebGL() {
@@ -177,10 +203,13 @@ export class MandelbrotApp {
         const maxIter = Math.min(effectiveIter, 4000);
         const cx = this.state.centerX;
         const cy = this.state.centerY;
+        const cxDD = this.state.centerDD_x;
+        const cyDD = this.state.centerDD_y;
         const zoom = this.state.zoom;
         const scale = 3.0 / zoom;
         const fractalType = this.state.fractalType;
         const juliaC = this.state.juliaC;
+        const isDD = zoom >= 1e13;
 
         const evalEscape = (x, y) => {
             let zx = 0.0, zy = 0.0;
@@ -199,19 +228,50 @@ export class MandelbrotApp {
             return maxIter;
         };
 
+        const evalEscapeDD = (cx_h, cx_l, cy_h, cy_l) => {
+            let zx_h = 0.0, zx_l = 0.0;
+            let zy_h = 0.0, zy_l = 0.0;
+            let ccx_h = cx_h, ccx_l = cx_l;
+            let ccy_h = cy_h, ccy_l = cy_l;
+            if (fractalType === 1) {
+                zx_h = cx_h; zx_l = cx_l;
+                zy_h = cy_h; zy_l = cy_l;
+                ccx_h = juliaC[0]; ccx_l = 0.0;
+                ccy_h = juliaC[1]; ccy_l = 0.0;
+            }
+            for (let i = 0; i < maxIter; i++) {
+                const [x2_h, x2_l] = dd_sqr(zx_h, zx_l);
+                const [y2_h, y2_l] = dd_sqr(zy_h, zy_l);
+                if (x2_h + y2_h > 64.0) return i;
+                const [p_h, p_l] = dd_mul(zx_h, zx_l, zy_h, zy_l);
+                const [newZy_h, newZy_l] = dd_add(2.0 * p_h, 2.0 * p_l, ccy_h, ccy_l);
+                const [diff_h, diff_l] = dd_sub(x2_h, x2_l, y2_h, y2_l);
+                const [newZx_h, newZx_l] = dd_add(diff_h, diff_l, ccx_h, ccx_l);
+                zx_h = newZx_h; zx_l = newZx_l;
+                zy_h = newZy_h; zy_l = newZy_l;
+            }
+            return maxIter;
+        };
+
+        let refDD_x = [...cxDD];
+        let refDD_y = [...cyDD];
         let refX = cx;
         let refY = cy;
-        let bestIter = evalEscape(cx, cy);
+        let bestIter = isDD ? evalEscapeDD(cxDD[0], cxDD[1], cyDD[0], cyDD[1]) : evalEscape(cx, cy);
 
         // If center escapes early and not maxIter, probe nearby points in the view
         if (bestIter < maxIter) {
             const cached = this.refOrbitCache;
             if (cached && cached.fractalType === fractalType && cached.refLen > bestIter) {
-                const dx = Math.abs(cached.refX - cx);
-                const dy = Math.abs(cached.refY - cy);
+                const dx = isDD ? Math.abs(dd_sub(cached.refDD_x[0], cached.refDD_x[1], cxDD[0], cxDD[1])[0]) : Math.abs(cached.refX - cx);
+                const dy = isDD ? Math.abs(dd_sub(cached.refDD_y[0], cached.refDD_y[1], cyDD[0], cyDD[1])[0]) : Math.abs(cached.refY - cy);
                 if (dx < scale * 0.7 && dy < scale * 0.7) {
                     refX = cached.refX;
                     refY = cached.refY;
+                    if (isDD && cached.refDD_x) {
+                        refDD_x = [...cached.refDD_x];
+                        refDD_y = [...cached.refDD_y];
+                    }
                     bestIter = cached.refLen;
                 }
             }
@@ -220,14 +280,28 @@ export class MandelbrotApp {
                 for (let dy = -2; dy <= 2; dy++) {
                     for (let dx = -2; dx <= 2; dx++) {
                         if (dx === 0 && dy === 0) continue;
-                        const px = cx + (dx / 4) * scale;
-                        const py = cy + (dy / 4) * scale;
-                        const it = evalEscape(px, py);
-                        if (it > bestIter) {
-                            bestIter = it;
-                            refX = px;
-                            refY = py;
-                            if (bestIter >= maxIter) break;
+                        if (isDD) {
+                            const pxDD = dd_add(cxDD[0], cxDD[1], (dx / 4) * scale, 0.0);
+                            const pyDD = dd_add(cyDD[0], cyDD[1], (dy / 4) * scale, 0.0);
+                            const it = evalEscapeDD(pxDD[0], pxDD[1], pyDD[0], pyDD[1]);
+                            if (it > bestIter) {
+                                bestIter = it;
+                                refDD_x = pxDD;
+                                refDD_y = pyDD;
+                                refX = pxDD[0] + pxDD[1];
+                                refY = pyDD[0] + pyDD[1];
+                                if (bestIter >= maxIter) break;
+                            }
+                        } else {
+                            const px = cx + (dx / 4) * scale;
+                            const py = cy + (dy / 4) * scale;
+                            const it = evalEscape(px, py);
+                            if (it > bestIter) {
+                                bestIter = it;
+                                refX = px;
+                                refY = py;
+                                if (bestIter >= maxIter) break;
+                            }
                         }
                     }
                     if (bestIter >= maxIter) break;
@@ -235,46 +309,104 @@ export class MandelbrotApp {
             }
         }
 
-        let zx = 0.0, zy = 0.0;
-        let cConstX = refX, cConstY = refY;
-        if (fractalType === 1) {
-            zx = refX; zy = refY;
-            cConstX = juliaC[0]; cConstY = juliaC[1];
-        }
-
         let actualLen = maxIter;
         const refData = this.refOrbitData;
 
-        for (let i = 0; i < maxIter; i++) {
-            refData[i * 2] = zx;
-            refData[i * 2 + 1] = zy;
-            const x2 = zx * zx;
-            const y2 = zy * zy;
-
-            if (x2 + y2 > 64.0) {
-                const endIdx = Math.min(maxIter, i + 6);
-                for (let j = i + 1; j < endIdx; j++) {
-                    const newZy = 2.0 * zx * zy + cConstY;
-                    zx = zx * zx - zy * zy + cConstX;
-                    zy = newZy;
-                    refData[j * 2] = zx;
-                    refData[j * 2 + 1] = zy;
-                }
-                actualLen = endIdx;
-                break;
+        if (isDD) {
+            let zx_h = 0.0, zx_l = 0.0;
+            let zy_h = 0.0, zy_l = 0.0;
+            let ccx_h = refDD_x[0], ccx_l = refDD_x[1];
+            let ccy_h = refDD_y[0], ccy_l = refDD_y[1];
+            if (fractalType === 1) {
+                zx_h = refDD_x[0]; zx_l = refDD_x[1];
+                zy_h = refDD_y[0]; zy_l = refDD_y[1];
+                ccx_h = juliaC[0]; ccx_l = 0.0;
+                ccy_h = juliaC[1]; ccy_l = 0.0;
             }
 
-            const newZy = 2.0 * zx * zy + cConstY;
-            zx = x2 - y2 + cConstX;
-            zy = newZy;
+            for (let i = 0; i < maxIter; i++) {
+                refData[i * 2] = zx_h;
+                refData[i * 2 + 1] = zy_h;
+
+                const [x2_h, x2_l] = dd_sqr(zx_h, zx_l);
+                const [y2_h, y2_l] = dd_sqr(zy_h, zy_l);
+
+                if (x2_h + y2_h > 64.0) {
+                    const endIdx = Math.min(maxIter, i + 6);
+                    for (let j = i + 1; j < endIdx; j++) {
+                        const [p_h, p_l] = dd_mul(zx_h, zx_l, zy_h, zy_l);
+                        const [newZy_h, newZy_l] = dd_add(2.0 * p_h, 2.0 * p_l, ccy_h, ccy_l);
+                        const [diff_h, diff_l] = dd_sub(x2_h, x2_l, y2_h, y2_l);
+                        const [newZx_h, newZx_l] = dd_add(diff_h, diff_l, ccx_h, ccx_l);
+                        zx_h = newZx_h; zx_l = newZx_l;
+                        zy_h = newZy_h; zy_l = newZy_l;
+                        refData[j * 2] = zx_h;
+                        refData[j * 2 + 1] = zy_h;
+                    }
+                    actualLen = endIdx;
+                    break;
+                }
+
+                const [p_h, p_l] = dd_mul(zx_h, zx_l, zy_h, zy_l);
+                const [newZy_h, newZy_l] = dd_add(2.0 * p_h, 2.0 * p_l, ccy_h, ccy_l);
+                const [diff_h, diff_l] = dd_sub(x2_h, x2_l, y2_h, y2_l);
+                const [newZx_h, newZx_l] = dd_add(diff_h, diff_l, ccx_h, ccx_l);
+                zx_h = newZx_h; zx_l = newZx_l;
+                zy_h = newZy_h; zy_l = newZy_l;
+            }
+        } else {
+            let zx = 0.0, zy = 0.0;
+            let cConstX = refX, cConstY = refY;
+            if (fractalType === 1) {
+                zx = refX; zy = refY;
+                cConstX = juliaC[0]; cConstY = juliaC[1];
+            }
+
+            for (let i = 0; i < maxIter; i++) {
+                refData[i * 2] = zx;
+                refData[i * 2 + 1] = zy;
+                const x2 = zx * zx;
+                const y2 = zy * zy;
+
+                if (x2 + y2 > 64.0) {
+                    const endIdx = Math.min(maxIter, i + 6);
+                    for (let j = i + 1; j < endIdx; j++) {
+                        const newZy = 2.0 * zx * zy + cConstY;
+                        zx = zx * zx - zy * zy + cConstX;
+                        zy = newZy;
+                        refData[j * 2] = zx;
+                        refData[j * 2 + 1] = zy;
+                    }
+                    actualLen = endIdx;
+                    break;
+                }
+
+                const newZy = 2.0 * zx * zy + cConstY;
+                zx = x2 - y2 + cConstX;
+                zy = newZy;
+            }
         }
 
         gl.bindTexture(gl.TEXTURE_2D, this.refOrbitTexture);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, actualLen, 1, gl.RG, gl.FLOAT, refData.subarray(0, actualLen * 2));
 
+        let dcBaseX = 0.0;
+        let dcBaseY = 0.0;
+        if (isDD) {
+            const [dx_h, dx_l] = dd_sub(cxDD[0], cxDD[1], refDD_x[0], refDD_x[1]);
+            const [dy_h, dy_l] = dd_sub(cyDD[0], cyDD[1], refDD_y[0], refDD_y[1]);
+            dcBaseX = dx_h + dx_l;
+            dcBaseY = dy_h + dy_l;
+        } else {
+            dcBaseX = cx - refX;
+            dcBaseY = cy - refY;
+        }
+
         this.refOrbitCache = {
             refX,
             refY,
+            refDD_x,
+            refDD_y,
             refLen: actualLen,
             zoom,
             centerX: cx,
@@ -283,7 +415,7 @@ export class MandelbrotApp {
             maxIter
         };
 
-        return { refX, refY, refLen: actualLen };
+        return { refX, refY, refLen: actualLen, dcBaseX, dcBaseY };
     }
 
     initSubsystems() {
@@ -355,7 +487,7 @@ export class MandelbrotApp {
         const useDouble = !usePerturb && this.isUsingDoublePrecision();
 
         if (usePerturb) {
-            const { refX, refY, refLen } = this.computeReferenceOrbit(effectiveIter);
+            const { refLen, dcBaseX, dcBaseY } = this.computeReferenceOrbit(effectiveIter);
             const locs = this.locationsPerturbation;
 
             gl.useProgram(this.programPerturbation);
@@ -363,10 +495,11 @@ export class MandelbrotApp {
 
             gl.uniform2f(locs.u_resolution, width, height);
             gl.uniform2f(locs.u_scale, scaleVal, scaleVal);
-            gl.uniform2f(locs.u_dc_base, this.state.centerX - refX, this.state.centerY - refY);
+            gl.uniform2f(locs.u_dc_base, dcBaseX, dcBaseY);
             gl.uniform2f(locs.u_center, this.state.centerX, this.state.centerY);
             gl.uniform1i(locs.u_max_iterations, effectiveIter);
             gl.uniform1i(locs.u_ref_len, refLen);
+
             gl.uniform1i(locs.u_fractal_type, this.state.fractalType);
             gl.uniform2f(locs.u_julia_c, this.state.juliaC[0], this.state.juliaC[1]);
 
@@ -460,8 +593,16 @@ export class MandelbrotApp {
                 // Smooth cubic ease-in-out
                 const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
-                this.state.centerX = anim.fromX + (anim.toX - anim.fromX) * ease;
-                this.state.centerY = anim.fromY + (anim.toY - anim.fromY) * ease;
+                const diffX = dd_sub(anim.toDD_x[0], anim.toDD_x[1], anim.fromDD_x[0], anim.fromDD_x[1]);
+                const diffY = dd_sub(anim.toDD_y[0], anim.toDD_y[1], anim.fromDD_y[0], anim.fromDD_y[1]);
+
+                const stepX = dd_mul(diffX[0], diffX[1], ease, 0.0);
+                const stepY = dd_mul(diffY[0], diffY[1], ease, 0.0);
+
+                this.state.centerDD_x = dd_add(anim.fromDD_x[0], anim.fromDD_x[1], stepX[0], stepX[1]);
+                this.state.centerDD_y = dd_add(anim.fromDD_y[0], anim.fromDD_y[1], stepY[0], stepY[1]);
+                this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
+                this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
 
                 // Logarithmic zoom interpolation for natural perceptual zoom speed
                 const logFrom = Math.log(anim.fromZoom);
@@ -480,8 +621,13 @@ export class MandelbrotApp {
             if (!this.isDragging && (Math.abs(this.momentum.vx) > 0.0001 || Math.abs(this.momentum.vy) > 0.0001)) {
                 const minDim = Math.min(this.canvas.width, this.canvas.height);
                 const scaleVal = 3.0 / this.state.zoom;
-                this.state.centerX -= (this.momentum.vx / minDim) * scaleVal;
-                this.state.centerY += (this.momentum.vy / minDim) * scaleVal;
+                const stepX = (this.momentum.vx / minDim) * scaleVal;
+                const stepY = (this.momentum.vy / minDim) * scaleVal;
+
+                this.state.centerDD_x = dd_sub(this.state.centerDD_x[0], this.state.centerDD_x[1], stepX, 0.0);
+                this.state.centerDD_y = dd_add(this.state.centerDD_y[0], this.state.centerDD_y[1], stepY, 0.0);
+                this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
+                this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
 
                 this.momentum.vx *= 0.90;
                 this.momentum.vy *= 0.90;
@@ -510,7 +656,7 @@ export class MandelbrotApp {
         requestAnimationFrame(loop);
     }
 
-    screenToComplex(px, py) {
+    screenToComplexDD(px, py) {
         const rect = this.canvas.getBoundingClientRect();
         const cssX = px - rect.left;
         const cssY = py - rect.top;
@@ -524,19 +670,39 @@ export class MandelbrotApp {
         const offsetY = (canvasY - 0.5 * this.canvas.height) / minDim;
 
         const scaleVal = 3.0 / this.state.zoom;
-        const real = this.state.centerX + offsetX * scaleVal;
-        const imag = this.state.centerY + offsetY * scaleVal;
+        const deltaX = offsetX * scaleVal;
+        const deltaY = offsetY * scaleVal;
+
+        const real = dd_add(this.state.centerDD_x[0], this.state.centerDD_x[1], deltaX, 0.0);
+        const imag = dd_add(this.state.centerDD_y[0], this.state.centerDD_y[1], deltaY, 0.0);
 
         return { real, imag };
     }
 
+    screenToComplex(px, py) {
+        const dd = this.screenToComplexDD(px, py);
+        return {
+            real: dd.real[0] + dd.real[1],
+            imag: dd.imag[0] + dd.imag[1]
+        };
+    }
+
     flyTo(targetX, targetY, targetZoom, duration = 1000) {
+        let toDD_x, toDD_y;
+        if (Array.isArray(targetX)) toDD_x = [targetX[0], targetX[1]];
+        else if (typeof targetX === 'string') toDD_x = dd_from_string(targetX);
+        else toDD_x = dd_set(targetX);
+
+        if (Array.isArray(targetY)) toDD_y = [targetY[0], targetY[1]];
+        else if (typeof targetY === 'string') toDD_y = dd_from_string(targetY);
+        else toDD_y = dd_set(targetY);
+
         this.cameraAnimation = {
-            fromX: this.state.centerX,
-            fromY: this.state.centerY,
+            fromDD_x: [...this.state.centerDD_x],
+            fromDD_y: [...this.state.centerDD_y],
             fromZoom: this.state.zoom,
-            toX: targetX,
-            toY: targetY,
+            toDD_x: toDD_x,
+            toDD_y: toDD_y,
             toZoom: targetZoom,
             startTime: performance.now(),
             duration: Math.max(300, duration)
@@ -545,8 +711,8 @@ export class MandelbrotApp {
     }
 
     zoomAtPoint(screenX, screenY, factor) {
-        const before = this.screenToComplex(screenX, screenY);
-        const newZoom = Math.max(0.1, Math.min(1e14, this.state.zoom * factor));
+        const before = this.screenToComplexDD(screenX, screenY);
+        const newZoom = Math.max(0.1, Math.min(1e30, this.state.zoom * factor));
 
         const minDim = Math.min(this.canvas.width, this.canvas.height);
         const rect = this.canvas.getBoundingClientRect();
@@ -558,8 +724,13 @@ export class MandelbrotApp {
         const offsetY = (canvasY - 0.5 * this.canvas.height) / minDim;
 
         const newScaleVal = 3.0 / newZoom;
-        this.state.centerX = before.real - offsetX * newScaleVal;
-        this.state.centerY = before.imag - offsetY * newScaleVal;
+        const deltaX = offsetX * newScaleVal;
+        const deltaY = offsetY * newScaleVal;
+
+        this.state.centerDD_x = dd_sub(before.real[0], before.real[1], deltaX, 0.0);
+        this.state.centerDD_y = dd_sub(before.imag[0], before.imag[1], deltaY, 0.0);
+        this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
+        this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
         this.state.zoom = newZoom;
 
         this.needsRender = true;
@@ -618,11 +789,19 @@ export class MandelbrotApp {
             this.state.juliaC = [...preset.juliaC];
         }
 
+        if (preset.centerX_str && preset.centerY_str) {
+            this.setCenter(preset.centerX_str, preset.centerY_str);
+        } else if (preset.centerDD_x && preset.centerDD_y) {
+            this.setCenter(preset.centerDD_x, preset.centerDD_y);
+        } else {
+            this.setCenter(preset.centerX, preset.centerY);
+        }
+
         this.setFractalType(preset.type, preset.juliaC);
-        this.flyTo(preset.centerX, preset.centerY, preset.zoom, 1200);
+        this.flyTo(this.state.centerDD_x, this.state.centerDD_y, preset.zoom, 1200);
 
         if (this.pipJulia && preset.type === 0) {
-            this.pipJulia.setConstant(preset.centerX, preset.centerY, this.state.palette, this.state.paletteFreq);
+            this.pipJulia.setConstant(this.state.centerX, this.state.centerY, this.state.palette, this.state.paletteFreq);
         }
     }
 
@@ -633,10 +812,13 @@ export class MandelbrotApp {
         const hudPrecision = document.getElementById('hudPrecision');
 
         if (hudCoords) {
-            const prec = Math.min(16, Math.max(8, Math.ceil(Math.log10(Math.max(1, this.state.zoom))) + 3));
-            const rx = this.state.centerX >= 0 ? `+${this.state.centerX.toFixed(prec)}` : this.state.centerX.toFixed(prec);
-            const ry = this.state.centerY >= 0 ? `+${this.state.centerY.toFixed(prec)}i` : `${this.state.centerY.toFixed(prec)}i`;
-            hudCoords.textContent = `${rx}, ${ry}`;
+            const zoomLog = Math.log10(Math.max(1, this.state.zoom));
+            const prec = Math.min(28, Math.max(8, Math.ceil(zoomLog) + 3));
+            const rx = dd_to_string(this.state.centerDD_x[0], this.state.centerDD_x[1], prec);
+            const ry = dd_to_string(this.state.centerDD_y[0], this.state.centerDD_y[1], prec);
+            const signX = (this.state.centerDD_x[0] >= 0 && !rx.startsWith('-') && !rx.startsWith('+')) ? '+' : '';
+            const signY = (this.state.centerDD_y[0] >= 0 && !ry.startsWith('-') && !ry.startsWith('+')) ? '+' : '';
+            hudCoords.textContent = `${signX}${rx}, ${signY}${ry}i`;
         }
 
         if (hudZoom) {
@@ -656,13 +838,25 @@ export class MandelbrotApp {
 
         if (hudPrecision) {
             const isPerturb = this.isUsingPerturbation();
-            const isDbl = isPerturb || this.isUsingDoublePrecision();
-            hudPrecision.textContent = isPerturb ? 'FP64 (Perturbation)' : (isDbl ? 'FP64 (Double)' : 'FP32 (Fast)');
-            hudPrecision.className = isDbl ? 'hud-badge badge-fp64' : 'hud-badge badge-fp32';
+            const isDD = this.state.zoom >= 1e14;
+            if (isDD) {
+                hudPrecision.textContent = 'FP106 (Double-Double)';
+                hudPrecision.className = 'hud-badge badge-fp64';
+            } else if (isPerturb) {
+                hudPrecision.textContent = 'FP64 (Perturbation)';
+                hudPrecision.className = 'hud-badge badge-fp64';
+            } else {
+                const isDbl = this.isUsingDoublePrecision();
+                hudPrecision.textContent = isDbl ? 'FP64 (Double)' : 'FP32 (Fast)';
+                hudPrecision.className = isDbl ? 'hud-badge badge-fp64' : 'hud-badge badge-fp32';
+            }
         }
     }
 
     initEvents() {
+        // Hash navigation support (browser back/forward or manual hash change)
+        window.addEventListener('hashchange', () => this.loadFromHash());
+
         // Resize observer
         const resizeObserver = new ResizeObserver(() => {
             this.resize();
@@ -685,6 +879,8 @@ export class MandelbrotApp {
                 this.isDragging = true;
                 this.dragStart = { x: e.clientX, y: e.clientY };
                 this.centerAtDragStart = { x: this.state.centerX, y: this.state.centerY };
+                this.centerAtDragStartDD_x = [...this.state.centerDD_x];
+                this.centerAtDragStartDD_y = [...this.state.centerDD_y];
                 this.lastPointerPos = { x: e.clientX, y: e.clientY };
                 this.lastPointerTime = performance.now();
                 this.momentum = { vx: 0, vy: 0 };
@@ -711,8 +907,13 @@ export class MandelbrotApp {
                 const scaleVal = 3.0 / this.state.zoom;
                 const dpr = this.state.dpr;
 
-                this.state.centerX = this.centerAtDragStart.x - (dx * dpr / minDim) * scaleVal;
-                this.state.centerY = this.centerAtDragStart.y + (dy * dpr / minDim) * scaleVal;
+                const deltaX = (dx * dpr / minDim) * scaleVal;
+                const deltaY = (dy * dpr / minDim) * scaleVal;
+
+                this.state.centerDD_x = dd_sub(this.centerAtDragStartDD_x[0], this.centerAtDragStartDD_x[1], deltaX, 0.0);
+                this.state.centerDD_y = dd_add(this.centerAtDragStartDD_y[0], this.centerAtDragStartDD_y[1], deltaY, 0.0);
+                this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
+                this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
 
                 // Track momentum
                 const now = performance.now();
@@ -783,6 +984,8 @@ export class MandelbrotApp {
                 this.isDragging = true;
                 this.dragStart = { x: t.clientX, y: t.clientY };
                 this.centerAtDragStart = { x: this.state.centerX, y: this.state.centerY };
+                this.centerAtDragStartDD_x = [...this.state.centerDD_x];
+                this.centerAtDragStartDD_y = [...this.state.centerDD_y];
                 this.momentum = { vx: 0, vy: 0 };
             } else if (this.activePointers.size === 2) {
                 this.isDragging = false;
@@ -806,8 +1009,13 @@ export class MandelbrotApp {
                 const scaleVal = 3.0 / this.state.zoom;
                 const dpr = this.state.dpr;
 
-                this.state.centerX = this.centerAtDragStart.x - (dx * dpr / minDim) * scaleVal;
-                this.state.centerY = this.centerAtDragStart.y + (dy * dpr / minDim) * scaleVal;
+                const deltaX = (dx * dpr / minDim) * scaleVal;
+                const deltaY = (dy * dpr / minDim) * scaleVal;
+
+                this.state.centerDD_x = dd_sub(this.centerAtDragStartDD_x[0], this.centerAtDragStartDD_x[1], deltaX, 0.0);
+                this.state.centerDD_y = dd_add(this.centerAtDragStartDD_y[0], this.centerAtDragStartDD_y[1], deltaY, 0.0);
+                this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
+                this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
                 this.needsRender = true;
             } else if (this.activePointers.size === 2 && this.initialPinchDistance > 0) {
                 const [t1, t2] = [e.touches[0], e.touches[1]];
@@ -850,19 +1058,22 @@ export class MandelbrotApp {
                 case 'ArrowLeft':
                 case 'a':
                 case 'A':
-                    this.state.centerX -= step;
+                    this.state.centerDD_x = dd_sub(this.state.centerDD_x[0], this.state.centerDD_x[1], step, 0.0);
+                    this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
                     this.needsRender = true;
                     break;
                 case 'ArrowRight':
                 case 'd':
                 case 'D':
-                    this.state.centerX += step;
+                    this.state.centerDD_x = dd_add(this.state.centerDD_x[0], this.state.centerDD_x[1], step, 0.0);
+                    this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
                     this.needsRender = true;
                     break;
                 case 'ArrowUp':
                 case 'w':
                 case 'W':
-                    this.state.centerY += step;
+                    this.state.centerDD_y = dd_add(this.state.centerDD_y[0], this.state.centerDD_y[1], step, 0.0);
+                    this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
                     this.needsRender = true;
                     break;
                 case 'ArrowDown':
@@ -873,7 +1084,8 @@ export class MandelbrotApp {
                         this.takeSnapshot();
                         return;
                     }
-                    this.state.centerY -= step;
+                    this.state.centerDD_y = dd_sub(this.state.centerDD_y[0], this.state.centerDD_y[1], step, 0.0);
+                    this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
                     this.needsRender = true;
                     break;
                 case '+':
@@ -961,11 +1173,12 @@ export class MandelbrotApp {
 
         const midX = (x1 + x2) / 2;
         const midY = (y1 + y2) / 2;
-        const centerComplex = this.screenToComplex(midX, midY);
+        const centerComplexDD = this.screenToComplexDD(midX, midY);
 
         const zoomFactor = Math.min(window.innerWidth / boxW, window.innerHeight / boxH);
-        this.flyTo(centerComplex.real, centerComplex.imag, this.state.zoom * zoomFactor, 800);
+        this.flyTo(centerComplexDD.real, centerComplexDD.imag, this.state.zoom * zoomFactor, 800);
     }
+
 
     nextPalette() {
         const idx = PALETTES.findIndex(p => p.id === this.state.palette.id);
@@ -1271,9 +1484,12 @@ export class MandelbrotApp {
 
     syncToHash() {
         const params = new URLSearchParams();
-        const prec = Math.min(16, Math.max(8, Math.ceil(Math.log10(Math.max(1, this.state.zoom))) + 3));
-        params.set('x', this.state.centerX.toFixed(prec));
-        params.set('y', this.state.centerY.toFixed(prec));
+        const zoomLog = Math.log10(Math.max(1, this.state.zoom));
+        const prec = Math.min(28, Math.max(8, Math.ceil(zoomLog) + 3));
+        const rx = dd_to_string(this.state.centerDD_x[0], this.state.centerDD_x[1], prec);
+        const ry = dd_to_string(this.state.centerDD_y[0], this.state.centerDD_y[1], prec);
+        params.set('x', rx);
+        params.set('y', ry);
         params.set('z', this.state.zoom >= 1e6 ? this.state.zoom.toExponential(4) : this.state.zoom.toFixed(4));
         params.set('iter', this.state.maxIterations);
         params.set('pal', this.state.palette.id);
@@ -1291,8 +1507,12 @@ export class MandelbrotApp {
             const hash = window.location.hash.substring(1);
             const params = new URLSearchParams(hash);
 
-            if (params.has('x')) this.state.centerX = parseFloat(params.get('x'));
-            if (params.has('y')) this.state.centerY = parseFloat(params.get('y'));
+            let newX = null, newY = null;
+            if (params.has('x')) newX = params.get('x');
+            if (params.has('y')) newY = params.get('y');
+            if (newX !== null || newY !== null) {
+                this.setCenter(newX ?? this.state.centerDD_x, newY ?? this.state.centerDD_y);
+            }
             if (params.has('z')) this.state.zoom = parseFloat(params.get('z'));
             if (params.has('iter')) {
                 this.state.maxIterations = parseInt(params.get('iter'), 10);

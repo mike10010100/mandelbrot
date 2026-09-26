@@ -122,6 +122,63 @@ export const PRESETS = [
         paletteId: 'ice',
         description: 'Delicate crystalline plumes radiating out into infinity'
     },
+    // Ultra-Deep Double-Double (FP106) wonders (10^18 to 10^28 zoom)
+    {
+        id: 'fp106_elephant_spiral',
+        name: 'Elephant Valley Spiral (1.14e18 Zoom)',
+        category: 'Ultra-Deep (FP106)',
+        type: 0,
+        centerX: 0.2617331068522581,
+        centerY: 0.0019088714018098115,
+        centerX_str: '0.2617331068522581094379944415',
+        centerY_str: '0.00190887140180981147845359632',
+        zoom: 1.14e18,
+        iterations: 3950,
+        paletteId: 'fire',
+        description: '106-bit double-double resolution of microscopic spiral swirls at 10^18x magnification'
+    },
+    {
+        id: 'fp106_deep_tendril',
+        name: 'Deep Tendril Vortex (5.25e20 Zoom)',
+        category: 'Ultra-Deep (FP106)',
+        type: 0,
+        centerX: 0.265571753852993,
+        centerY: 0.0029724527621191567,
+        centerX_str: '0.26557175385299295977317512431045',
+        centerY_str: '0.0029724527621191566863238539335865',
+        zoom: 5.25e20,
+        iterations: 2500,
+        paletteId: 'cyberpunk',
+        description: 'Electrified logarithmic tendril galaxy deep within the boundary at 5.25 × 10^20x zoom'
+    },
+    {
+        id: 'fp106_needle_minibrot',
+        name: 'Needle Satellite Brot (3.81e20 Zoom)',
+        category: 'Ultra-Deep (FP106)',
+        type: 0,
+        centerX: -0.6418858965635481,
+        centerY: 0.0000000860930859,
+        centerX_str: '-0.64188589656354808793146967261',
+        centerY_str: '0.0000000860930859117602508121328612544',
+        zoom: 3.81e20,
+        iterations: 3200,
+        paletteId: 'cosmic',
+        description: 'Flawless satellite minibrot suspended on a 10^-20 filament needle'
+    },
+    {
+        id: 'fp106_dumbbell_nebula',
+        name: 'Dumbbell Nebula (3.55e28 Zoom)',
+        category: 'Ultra-Deep (FP106)',
+        type: 0,
+        centerX: 0.36544123740689855,
+        centerY: 0.362798255861987,
+        centerX_str: '0.365441237406898537275634464919826944709',
+        centerY_str: '0.3627982558619870213261499227436402711285',
+        zoom: 3.55e28,
+        iterations: 3000,
+        paletteId: 'rainbow',
+        description: 'The absolute outer limit of Double-Double precision: 3.55 × 10^28x magnification'
+    },
     // Julia sets
     {
         id: 'douady_rabbit',
