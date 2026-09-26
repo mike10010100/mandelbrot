@@ -1,0 +1,12 @@
+{
+  "name": "mandelbrot-explorer",
+  "version": "1.0.0",
+  "description": "High-performance interactive WebGL2 Mandelbrot, Julia, and Burning Ship fractal explorer",
+  "scripts": {
+    "start": "python3 server.py",
+    "serve": "npx -y serve . -p 8088"
+  },
+  "keywords": ["mandelbrot", "fractal", "webgl2", "julia-set", "gpu-shader"],
+  "author": "",
+  "license": "MIT"
+}
