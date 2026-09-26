@@ -302,11 +302,6 @@ uniform vec2 u_julia_c;
 uniform sampler2D u_refOrbit;
 uniform int u_interior_mode; // 0: black, 1: glow, 2: zebra
 
-// Bivariate Series Approximation (Taylor polynomial iteration skipping)
-uniform int u_skip_iterations;
-uniform vec2 u_series_A;
-uniform vec2 u_series_B;
-
 const float ESCAPE_RADIUS_SQ = 64.0;
 
 void main() {
@@ -337,15 +332,6 @@ void main() {
     int period_steps = 0;
 
     int i = 0;
-
-    // Series Approximation Fast-Forward: Jump directly to iteration S in 1 step!
-    if (u_skip_iterations > 0 && u_skip_iterations < u_ref_len && u_skip_iterations < u_max_iterations) {
-        vec2 dc2 = vec2(dc.x * dc.x - dc.y * dc.y, 2.0 * dc.x * dc.y);
-        vec2 A_dc = vec2(u_series_A.x * dc.x - u_series_A.y * dc.y, u_series_A.x * dc.y + u_series_A.y * dc.x);
-        vec2 B_dc2 = vec2(u_series_B.x * dc2.x - u_series_B.y * dc2.y, u_series_B.x * dc2.y + u_series_B.y * dc2.x);
-        dz = A_dc + B_dc2;
-        i = u_skip_iterations;
-    }
 
     // Phase 1: Perturbation theory using high-precision reference orbit
     for (; i < 4000; i++) {

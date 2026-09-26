@@ -240,10 +240,7 @@ export class MandelbrotApp {
             u_fractal_type: gl.getUniformLocation(program, 'u_fractal_type'),
             u_julia_c: gl.getUniformLocation(program, 'u_julia_c'),
             u_refOrbit: gl.getUniformLocation(program, 'u_refOrbit'),
-            u_interior_mode: gl.getUniformLocation(program, 'u_interior_mode'),
-            u_skip_iterations: gl.getUniformLocation(program, 'u_skip_iterations'),
-            u_series_A: gl.getUniformLocation(program, 'u_series_A'),
-            u_series_B: gl.getUniformLocation(program, 'u_series_B')
+            u_interior_mode: gl.getUniformLocation(program, 'u_interior_mode')
         };
     }
 
@@ -258,7 +255,7 @@ export class MandelbrotApp {
         const scale = 3.0 / zoom;
         const fractalType = this.state.fractalType;
         const juliaC = this.state.juliaC;
-        const isDD = zoom >= 1e13;
+        const isDD = zoom >= 1e14;
 
         const evalEscape = (x, y, limit = maxIter) => {
             let zx = 0.0, zy = 0.0;
@@ -306,15 +303,17 @@ export class MandelbrotApp {
         let refDD_y = [...cyDD];
         let refX = cx;
         let refY = cy;
-        let bestIter = isDD ? evalEscapeDD(cxDD[0], cxDD[1], cyDD[0], cyDD[1]) : evalEscape(cx, cy);
+        let centerIter = isDD ? evalEscapeDD(cxDD[0], cxDD[1], cyDD[0], cyDD[1]) : evalEscape(cx, cy);
+        let bestIter = centerIter;
 
-        // Check if cached orbit can be reused (within perturbation radius)
+        // Check if cached reference orbit can be reused
         const cached = this.refOrbitCache;
         let canReuseCached = false;
-        if (cached && cached.fractalType === fractalType && cached.refLen > 500) {
+        if (cached && cached.fractalType === fractalType) {
             const dx = isDD ? Math.abs(dd_sub(cached.refDD_x[0], cached.refDD_x[1], cxDD[0], cxDD[1])[0]) : Math.abs(cached.refX - cx);
             const dy = isDD ? Math.abs(dd_sub(cached.refDD_y[0], cached.refDD_y[1], cyDD[0], cyDD[1])[0]) : Math.abs(cached.refY - cy);
-            if (dx < scale * 0.9 && dy < scale * 0.9) {
+            // Re-use cached orbit if still within viewport and survived at least as long as center
+            if (dx < scale * 1.1 && dy < scale * 1.1 && cached.refLen >= centerIter) {
                 refX = cached.refX;
                 refY = cached.refY;
                 if (isDD && cached.refDD_x) {
@@ -326,48 +325,52 @@ export class MandelbrotApp {
             }
         }
 
-        // If center escapes early and we cannot reuse cache, search candidate points using 2-stage probe
-        if (!canReuseCached && bestIter < maxIter) {
-            const probeLimit = Math.min(250, maxIter);
-            let bestProbeIter = bestIter;
+        // If center point escapes before maxIter and cannot reuse cache, search candidate points in a 7x7 grid
+        if (bestIter < maxIter && (!canReuseCached || bestIter < 200)) {
             let bestCandidate = null;
+            let candidateBestIter = bestIter;
 
-            for (let dy = -2; dy <= 2; dy++) {
-                for (let dx = -2; dx <= 2; dx++) {
+            for (let dy = -3; dy <= 3; dy++) {
+                for (let dx = -3; dx <= 3; dx++) {
                     if (dx === 0 && dy === 0) continue;
+                    const offsetX = (dx / 3.5) * scale * 0.5;
+                    const offsetY = (dy / 3.5) * scale * 0.5;
+
                     if (isDD) {
-                        const pxDD = dd_add(cxDD[0], cxDD[1], (dx / 4) * scale, 0.0);
-                        const pyDD = dd_add(cyDD[0], cyDD[1], (dy / 4) * scale, 0.0);
-                        const it = evalEscapeDD(pxDD[0], pxDD[1], pyDD[0], pyDD[1], probeLimit);
-                        if (it > bestProbeIter) {
-                            bestProbeIter = it;
+                        const pxDD = dd_add(cxDD[0], cxDD[1], offsetX, 0.0);
+                        const pyDD = dd_add(cyDD[0], cyDD[1], offsetY, 0.0);
+                        const it = evalEscapeDD(pxDD[0], pxDD[1], pyDD[0], pyDD[1], maxIter);
+                        if (it > candidateBestIter) {
+                            candidateBestIter = it;
                             bestCandidate = { pxDD, pyDD, px: pxDD[0] + pxDD[1], py: pyDD[0] + pyDD[1] };
+                            if (it === maxIter) break;
                         }
                     } else {
-                        const px = cx + (dx / 4) * scale;
-                        const py = cy + (dy / 4) * scale;
-                        const it = evalEscape(px, py, probeLimit);
-                        if (it > bestProbeIter) {
-                            bestProbeIter = it;
+                        const px = cx + offsetX;
+                        const py = cy + offsetY;
+                        const it = evalEscape(px, py, maxIter);
+                        if (it > candidateBestIter) {
+                            candidateBestIter = it;
                             bestCandidate = { px, py };
+                            if (it === maxIter) break;
                         }
                     }
                 }
+                if (candidateBestIter === maxIter) break;
             }
 
-            // Stage 2: Evaluate winning candidate up to full maxIter
-            if (bestCandidate) {
+            // Hysteresis: only switch if candidate is significantly better or hits maxIter
+            if (bestCandidate && (candidateBestIter === maxIter || candidateBestIter > bestIter * 1.3 + 30)) {
                 if (isDD) {
                     refDD_x = bestCandidate.pxDD;
                     refDD_y = bestCandidate.pyDD;
                     refX = bestCandidate.px;
                     refY = bestCandidate.py;
-                    bestIter = evalEscapeDD(refDD_x[0], refDD_x[1], refDD_y[0], refDD_y[1], maxIter);
                 } else {
                     refX = bestCandidate.px;
                     refY = bestCandidate.py;
-                    bestIter = evalEscape(refX, refY, maxIter);
                 }
+                bestIter = candidateBestIter;
             }
         }
 
@@ -464,58 +467,6 @@ export class MandelbrotApp {
             dcBaseY = cy - refY;
         }
 
-        // Bivariate Series Approximation (Taylor Polynomial Fast-Forwarding)
-        let skipIter = 0;
-        let seriesA = [0.0, 0.0];
-        let seriesB = [0.0, 0.0];
-
-        if (fractalType === 0 || fractalType === 1) {
-            let Ax = fractalType === 1 ? 1.0 : 0.0;
-            let Ay = 0.0;
-            let Bx = 0.0;
-            let By = 0.0;
-            const maxRadius = scale * 1.5;
-
-            for (let n = 0; n < actualLen - 5; n++) {
-                const Zx = refData[n * 2];
-                const Zy = refData[n * 2 + 1];
-
-                const magA = Math.hypot(Ax, Ay);
-                const magB = Math.hypot(Bx, By);
-                const linearDisp = magA * maxRadius;
-                const quadDisp = magB * maxRadius * maxRadius;
-
-                if (Zx * Zx + Zy * Zy > 4.0 || linearDisp > 0.5 || quadDisp > 0.1 * (linearDisp + 1e-12) || magB * maxRadius > 0.1) {
-                    break;
-                }
-
-                skipIter = n;
-                seriesA = [Ax, Ay];
-                seriesB = [Bx, By];
-
-                const two_ZA_x = 2.0 * (Zx * Ax - Zy * Ay);
-                const two_ZA_y = 2.0 * (Zx * Ay + Zy * Ax);
-                const nextAx = two_ZA_x + (fractalType === 0 ? 1.0 : 0.0);
-                const nextAy = two_ZA_y;
-
-                const two_ZB_x = 2.0 * (Zx * Bx - Zy * By);
-                const two_ZB_y = 2.0 * (Zx * By + Zy * Bx);
-                const A2_x = Ax * Ax - Ay * Ay;
-                const A2_y = 2.0 * Ax * Ay;
-                const nextBx = two_ZB_x + A2_x;
-                const nextBy = two_ZB_y + A2_y;
-
-                if (!isFinite(nextAx) || !isFinite(nextBx) || Math.abs(nextAx) > 1e20 || Math.abs(nextBx) > 1e35) {
-                    break;
-                }
-
-                Ax = nextAx;
-                Ay = nextAy;
-                Bx = nextBx;
-                By = nextBy;
-            }
-        }
-
         this.refOrbitCache = {
             refX,
             refY,
@@ -529,7 +480,7 @@ export class MandelbrotApp {
             maxIter
         };
 
-        return { refX, refY, refLen: actualLen, dcBaseX, dcBaseY, skipIter, seriesA, seriesB };
+        return { refX, refY, refLen: actualLen, dcBaseX, dcBaseY };
     }
 
     initSubsystems() {
@@ -578,8 +529,17 @@ export class MandelbrotApp {
     isUsingDoublePrecision() {
         if (this.state.precisionMode === 'double') return true;
         if (this.state.precisionMode === 'single') return false;
-        // Auto: switch above 50,000x zoom where float32 begins pixelating
-        return this.state.zoom >= 50000;
+        // Auto: switch with hysteresis (switch to double/perturbation >= 50,000x; revert to single < 40,000x)
+        if (this._currentPrecisionDouble) {
+            if (this.state.zoom < 40000) {
+                this._currentPrecisionDouble = false;
+            }
+        } else {
+            if (this.state.zoom >= 50000) {
+                this._currentPrecisionDouble = true;
+            }
+        }
+        return !!this._currentPrecisionDouble;
     }
 
     isUsingPerturbation() {
@@ -604,7 +564,7 @@ export class MandelbrotApp {
         gl.viewport(0, 0, width, height);
 
         if (usePerturb) {
-            const { refLen, dcBaseX, dcBaseY, skipIter, seriesA, seriesB } = this.computeReferenceOrbit(effectiveIter);
+            const { refLen, dcBaseX, dcBaseY } = this.computeReferenceOrbit(effectiveIter);
             const locs = this.locationsPerturbation;
 
             gl.useProgram(this.programPerturbation);
@@ -620,10 +580,6 @@ export class MandelbrotApp {
             gl.uniform1i(locs.u_fractal_type, this.state.fractalType);
             gl.uniform2f(locs.u_julia_c, this.state.juliaC[0], this.state.juliaC[1]);
             gl.uniform1i(locs.u_interior_mode, this.state.interiorMode);
-
-            gl.uniform1i(locs.u_skip_iterations, skipIter);
-            gl.uniform2f(locs.u_series_A, seriesA[0], seriesA[1]);
-            gl.uniform2f(locs.u_series_B, seriesB[0], seriesB[1]);
 
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, this.refOrbitTexture);
@@ -1455,17 +1411,20 @@ export class MandelbrotApp {
         // Iterations slider
         const iterSlider = document.getElementById('iterationsSlider');
         const iterValue = document.getElementById('iterationsValue');
+        const autoIterToggle = document.getElementById('autoIterationsToggle');
+
         if (iterSlider) {
             iterSlider.value = this.state.maxIterations;
             iterSlider.addEventListener('input', (e) => {
                 this.state.maxIterations = parseInt(e.target.value, 10);
                 if (iterValue) iterValue.textContent = this.state.maxIterations;
+                this.state.autoIterations = false;
+                if (autoIterToggle) autoIterToggle.checked = false;
                 this.invalidateFractal();
             });
         }
 
         // Auto iterations toggle
-        const autoIterToggle = document.getElementById('autoIterationsToggle');
         if (autoIterToggle) {
             autoIterToggle.checked = this.state.autoIterations;
             autoIterToggle.addEventListener('change', (e) => {
