@@ -315,3 +315,133 @@ void main() {
     fragColor = vec4(color, 1.0);
 }
 `;
+
+export const FRAGMENT_SHADER_PERTURBATION = `#version 300 es
+precision highp float;
+
+out vec4 fragColor;
+
+uniform vec2 u_resolution;
+uniform vec2 u_scale;
+uniform vec2 u_dc_base;
+uniform vec2 u_center;
+uniform int u_max_iterations;
+uniform int u_ref_len;
+uniform int u_fractal_type; // 0=Mandelbrot, 1=Julia
+uniform vec2 u_julia_c;
+uniform sampler2D u_refOrbit;
+
+uniform vec3 u_palette_a;
+uniform vec3 u_palette_b;
+uniform vec3 u_palette_c;
+uniform vec3 u_palette_d;
+uniform float u_palette_freq;
+uniform float u_palette_phase;
+uniform int u_interior_mode; // 0: black, 1: glow, 2: zebra
+
+const float PI2 = 6.283185307179586;
+const float ESCAPE_RADIUS_SQ = 64.0;
+
+vec3 evalPalette(float t) {
+    return u_palette_a + u_palette_b * cos(PI2 * (u_palette_c * t + u_palette_d));
+}
+
+void main() {
+    float minDim = min(u_resolution.x, u_resolution.y);
+    vec2 offset = (gl_FragCoord.xy - 0.5 * u_resolution) / minDim;
+    vec2 dc = u_dc_base + offset * u_scale;
+    vec2 c_approx = u_center + offset * u_scale;
+
+    vec2 dz;
+    vec2 dc_step;
+    if (u_fractal_type == 1) {
+        // Julia: dz0 = dc, constant in loop is 0
+        dz = dc;
+        dc_step = vec2(0.0);
+    } else {
+        // Mandelbrot: dz0 = 0, delta c added at each iteration
+        dz = vec2(0.0);
+        dc_step = dc;
+    }
+
+    int iter = 0;
+    float r2 = 0.0;
+    float minDistanceSq = 1e10;
+    float stripeAccum = 0.0;
+    vec2 z = vec2(0.0);
+
+    // Phase 1: Perturbation theory using high-precision reference orbit
+    int i = 0;
+    for (; i < 4000; i++) {
+        if (i >= u_ref_len || i >= u_max_iterations) break;
+
+        vec2 Z = texelFetch(u_refOrbit, ivec2(i, 0), 0).xy;
+        z = Z + dz;
+        r2 = dot(z, z);
+
+        if (r2 > ESCAPE_RADIUS_SQ) {
+            iter = i;
+            break;
+        }
+
+        if (i > 0) {
+            minDistanceSq = min(minDistanceSq, r2);
+            stripeAccum += 0.5 + 0.5 * sin(2.0 * atan(z.y, z.x) + r2);
+        }
+
+        // Complex perturbation recurrence: dz_{n+1} = 2 * Z_n * dz_n + dz_n^2 + dc
+        vec2 two_Z_dz = 2.0 * vec2(Z.x * dz.x - Z.y * dz.y, Z.x * dz.y + Z.y * dz.x);
+        vec2 dz2 = vec2(dz.x * dz.x - dz.y * dz.y, 2.0 * dz.x * dz.y);
+        dz = two_Z_dz + dz2 + dc_step;
+    }
+
+    // Phase 2: Smooth fallback for any pixels that outlive reference orbit
+    if (r2 <= ESCAPE_RADIUS_SQ && i < u_max_iterations) {
+        vec2 constC = (u_fractal_type == 1) ? u_julia_c : c_approx;
+        for (; i < 4000; i++) {
+            if (i >= u_max_iterations) break;
+
+            float zx2 = z.x * z.x;
+            float zy2 = z.y * z.y;
+            r2 = zx2 + zy2;
+
+            if (r2 > ESCAPE_RADIUS_SQ) {
+                iter = i;
+                break;
+            }
+
+            if (i > 0) {
+                minDistanceSq = min(minDistanceSq, r2);
+                stripeAccum += 0.5 + 0.5 * sin(2.0 * atan(z.y, z.x) + r2);
+            }
+
+            z = vec2(zx2 - zy2 + constC.x, 2.0 * z.x * z.y + constC.y);
+        }
+    }
+
+    if (r2 <= ESCAPE_RADIUS_SQ) {
+        // Interior coloring
+        if (u_interior_mode == 1) {
+            float glow = clamp(1.0 - sqrt(minDistanceSq) * 1.3, 0.0, 1.0);
+            vec3 intCol = u_palette_a * pow(glow, 2.2) * 0.8;
+            fragColor = vec4(intCol, 1.0);
+        } else if (u_interior_mode == 2) {
+            float s = 0.5 + 0.5 * sin(stripeAccum * 0.4);
+            fragColor = vec4(u_palette_a * s * 0.5, 1.0);
+        } else {
+            fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        }
+        return;
+    }
+
+    // Continuous normalized smooth iteration count
+    float logR = 0.5 * log(r2);
+    float nu = float(iter) + 1.0 - log(max(1.0, logR)) / log(2.0);
+
+    float t = nu * (u_palette_freq * 0.04) + u_palette_phase;
+    vec3 color = evalPalette(t);
+
+    fragColor = vec4(color, 1.0);
+}
+`;
+

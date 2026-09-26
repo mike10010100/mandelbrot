@@ -1,7 +1,7 @@
 // Main Application Controller for Interactive Mandelbrot Fractal Explorer
 import { PALETTES, getPalette } from './palettes.js';
 import { PRESETS } from './presets.js';
-import { VERTEX_SHADER, FRAGMENT_SHADER_SINGLE, FRAGMENT_SHADER_DOUBLE } from './shaders.js';
+import { VERTEX_SHADER, FRAGMENT_SHADER_SINGLE, FRAGMENT_SHADER_DOUBLE, FRAGMENT_SHADER_PERTURBATION } from './shaders.js';
 import { createProgram, setupQuad, splitFloat } from './webgl-utils.js';
 import { Minimap } from './minimap.js';
 import { PipJulia } from './pip-julia.js';
@@ -89,18 +89,33 @@ export class MandelbrotApp {
     initWebGL() {
         const gl = this.gl;
 
-        // Compile single-precision and double-precision programs
+        // Compile single-precision, double-precision, and perturbation programs
         try {
             this.programSingle = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER_SINGLE);
             this.locationsSingle = this.cacheUniformLocations(this.programSingle, false);
 
             this.programDouble = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER_DOUBLE);
             this.locationsDouble = this.cacheUniformLocations(this.programDouble, true);
+
+            this.programPerturbation = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER_PERTURBATION);
+            this.locationsPerturbation = this.cachePerturbationLocations(this.programPerturbation);
         } catch (e) {
             console.error('Shader initialization failed:', e);
             alert('Shader compilation error: ' + e.message);
             return;
         }
+
+        // Initialize 1D RG32F reference orbit texture for deep zoom perturbation
+        this.refOrbitTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, this.refOrbitTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, 4096, 1, 0, gl.RG, gl.FLOAT, null);
+
+        this.refOrbitData = new Float32Array(4096 * 2);
+        this.refOrbitCache = null;
 
         this.quadVao = setupQuad(gl);
         this.resize();
@@ -133,6 +148,142 @@ export class MandelbrotApp {
         }
 
         return locs;
+    }
+
+    cachePerturbationLocations(program) {
+        const gl = this.gl;
+        return {
+            u_resolution: gl.getUniformLocation(program, 'u_resolution'),
+            u_scale: gl.getUniformLocation(program, 'u_scale'),
+            u_dc_base: gl.getUniformLocation(program, 'u_dc_base'),
+            u_center: gl.getUniformLocation(program, 'u_center'),
+            u_max_iterations: gl.getUniformLocation(program, 'u_max_iterations'),
+            u_ref_len: gl.getUniformLocation(program, 'u_ref_len'),
+            u_fractal_type: gl.getUniformLocation(program, 'u_fractal_type'),
+            u_julia_c: gl.getUniformLocation(program, 'u_julia_c'),
+            u_refOrbit: gl.getUniformLocation(program, 'u_refOrbit'),
+            u_palette_a: gl.getUniformLocation(program, 'u_palette_a'),
+            u_palette_b: gl.getUniformLocation(program, 'u_palette_b'),
+            u_palette_c: gl.getUniformLocation(program, 'u_palette_c'),
+            u_palette_d: gl.getUniformLocation(program, 'u_palette_d'),
+            u_palette_freq: gl.getUniformLocation(program, 'u_palette_freq'),
+            u_palette_phase: gl.getUniformLocation(program, 'u_palette_phase'),
+            u_interior_mode: gl.getUniformLocation(program, 'u_interior_mode')
+        };
+    }
+
+    computeReferenceOrbit(effectiveIter) {
+        const gl = this.gl;
+        const maxIter = Math.min(effectiveIter, 4000);
+        const cx = this.state.centerX;
+        const cy = this.state.centerY;
+        const zoom = this.state.zoom;
+        const scale = 3.0 / zoom;
+        const fractalType = this.state.fractalType;
+        const juliaC = this.state.juliaC;
+
+        const evalEscape = (x, y) => {
+            let zx = 0.0, zy = 0.0;
+            let cConstX = x, cConstY = y;
+            if (fractalType === 1) {
+                zx = x; zy = y;
+                cConstX = juliaC[0]; cConstY = juliaC[1];
+            }
+            for (let i = 0; i < maxIter; i++) {
+                const x2 = zx * zx, y2 = zy * zy;
+                if (x2 + y2 > 64.0) return i;
+                const newZy = 2.0 * zx * zy + cConstY;
+                zx = x2 - y2 + cConstX;
+                zy = newZy;
+            }
+            return maxIter;
+        };
+
+        let refX = cx;
+        let refY = cy;
+        let bestIter = evalEscape(cx, cy);
+
+        // If center escapes early and not maxIter, probe nearby points in the view
+        if (bestIter < maxIter) {
+            const cached = this.refOrbitCache;
+            if (cached && cached.fractalType === fractalType && cached.refLen > bestIter) {
+                const dx = Math.abs(cached.refX - cx);
+                const dy = Math.abs(cached.refY - cy);
+                if (dx < scale * 0.7 && dy < scale * 0.7) {
+                    refX = cached.refX;
+                    refY = cached.refY;
+                    bestIter = cached.refLen;
+                }
+            }
+
+            if (bestIter < maxIter) {
+                for (let dy = -2; dy <= 2; dy++) {
+                    for (let dx = -2; dx <= 2; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const px = cx + (dx / 4) * scale;
+                        const py = cy + (dy / 4) * scale;
+                        const it = evalEscape(px, py);
+                        if (it > bestIter) {
+                            bestIter = it;
+                            refX = px;
+                            refY = py;
+                            if (bestIter >= maxIter) break;
+                        }
+                    }
+                    if (bestIter >= maxIter) break;
+                }
+            }
+        }
+
+        let zx = 0.0, zy = 0.0;
+        let cConstX = refX, cConstY = refY;
+        if (fractalType === 1) {
+            zx = refX; zy = refY;
+            cConstX = juliaC[0]; cConstY = juliaC[1];
+        }
+
+        let actualLen = maxIter;
+        const refData = this.refOrbitData;
+
+        for (let i = 0; i < maxIter; i++) {
+            refData[i * 2] = zx;
+            refData[i * 2 + 1] = zy;
+            const x2 = zx * zx;
+            const y2 = zy * zy;
+
+            if (x2 + y2 > 64.0) {
+                const endIdx = Math.min(maxIter, i + 6);
+                for (let j = i + 1; j < endIdx; j++) {
+                    const newZy = 2.0 * zx * zy + cConstY;
+                    zx = zx * zx - zy * zy + cConstX;
+                    zy = newZy;
+                    refData[j * 2] = zx;
+                    refData[j * 2 + 1] = zy;
+                }
+                actualLen = endIdx;
+                break;
+            }
+
+            const newZy = 2.0 * zx * zy + cConstY;
+            zx = x2 - y2 + cConstX;
+            zy = newZy;
+        }
+
+        gl.bindTexture(gl.TEXTURE_2D, this.refOrbitTexture);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, actualLen, 1, gl.RG, gl.FLOAT, refData.subarray(0, actualLen * 2));
+
+        this.refOrbitCache = {
+            refX,
+            refY,
+            refLen: actualLen,
+            zoom,
+            centerX: cx,
+            centerY: cy,
+            fractalType,
+            maxIter
+        };
+
+        return { refX, refY, refLen: actualLen };
     }
 
     initSubsystems() {
@@ -180,8 +331,16 @@ export class MandelbrotApp {
     isUsingDoublePrecision() {
         if (this.state.precisionMode === 'double') return true;
         if (this.state.precisionMode === 'single') return false;
-        // Auto: switch to double-single emulated float64 above 1e5 zoom
-        return this.state.zoom >= 100000;
+        // Auto: switch above 50,000x zoom where float32 begins pixelating
+        return this.state.zoom >= 50000;
+    }
+
+    isUsingPerturbation() {
+        // Perturbation supports Mandelbrot (type 0) and Julia (type 1)
+        if (this.state.fractalType !== 0 && this.state.fractalType !== 1) {
+            return false;
+        }
+        return this.isUsingDoublePrecision();
     }
 
     render() {
@@ -190,46 +349,83 @@ export class MandelbrotApp {
         const height = this.canvas.height;
         const minDim = Math.min(width, height);
         const scaleVal = 3.0 / this.state.zoom;
+        const effectiveIter = this.getEffectiveIterations();
 
-        const useDouble = this.isUsingDoublePrecision();
-        const program = useDouble ? this.programDouble : this.programSingle;
-        const locs = useDouble ? this.locationsDouble : this.locationsSingle;
+        const usePerturb = this.isUsingPerturbation();
+        const useDouble = !usePerturb && this.isUsingDoublePrecision();
 
-        gl.useProgram(program);
-        gl.bindVertexArray(this.quadVao);
+        if (usePerturb) {
+            const { refX, refY, refLen } = this.computeReferenceOrbit(effectiveIter);
+            const locs = this.locationsPerturbation;
 
-        gl.uniform2f(locs.u_resolution, width, height);
-        gl.uniform1i(locs.u_max_iterations, this.getEffectiveIterations());
-        gl.uniform1i(locs.u_fractal_type, this.state.fractalType);
-        gl.uniform2f(locs.u_julia_c, this.state.juliaC[0], this.state.juliaC[1]);
+            gl.useProgram(this.programPerturbation);
+            gl.bindVertexArray(this.quadVao);
 
-        // Palettes
-        const pal = this.state.palette;
-        gl.uniform3fv(locs.u_palette_a, pal.a);
-        gl.uniform3fv(locs.u_palette_b, pal.b);
-        gl.uniform3fv(locs.u_palette_c, pal.c);
-        gl.uniform3fv(locs.u_palette_d, pal.d);
-        gl.uniform1f(locs.u_palette_freq, this.state.paletteFreq);
-        gl.uniform1f(locs.u_palette_phase, this.state.palettePhase);
-        gl.uniform1i(locs.u_interior_mode, this.state.interiorMode);
-
-        if (useDouble) {
-            const [cxHi, cxLo] = splitFloat(this.state.centerX);
-            const [cyHi, cyLo] = splitFloat(this.state.centerY);
-            gl.uniform2f(locs.u_center_hi, cxHi, cyHi);
-            gl.uniform2f(locs.u_center_lo, cxLo, cyLo);
-
-            const [sxHi, sxLo] = splitFloat(scaleVal);
-            const [syHi, syLo] = splitFloat(scaleVal);
-            gl.uniform2f(locs.u_scale_hi, sxHi, syHi);
-            gl.uniform2f(locs.u_scale_lo, sxLo, syLo);
-        } else {
-            gl.uniform2f(locs.u_center, this.state.centerX, this.state.centerY);
+            gl.uniform2f(locs.u_resolution, width, height);
             gl.uniform2f(locs.u_scale, scaleVal, scaleVal);
-        }
+            gl.uniform2f(locs.u_dc_base, this.state.centerX - refX, this.state.centerY - refY);
+            gl.uniform2f(locs.u_center, this.state.centerX, this.state.centerY);
+            gl.uniform1i(locs.u_max_iterations, effectiveIter);
+            gl.uniform1i(locs.u_ref_len, refLen);
+            gl.uniform1i(locs.u_fractal_type, this.state.fractalType);
+            gl.uniform2f(locs.u_julia_c, this.state.juliaC[0], this.state.juliaC[1]);
 
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
-        gl.bindVertexArray(null);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.refOrbitTexture);
+            gl.uniform1i(locs.u_refOrbit, 0);
+
+            // Palettes
+            const pal = this.state.palette;
+            gl.uniform3fv(locs.u_palette_a, pal.a);
+            gl.uniform3fv(locs.u_palette_b, pal.b);
+            gl.uniform3fv(locs.u_palette_c, pal.c);
+            gl.uniform3fv(locs.u_palette_d, pal.d);
+            gl.uniform1f(locs.u_palette_freq, this.state.paletteFreq);
+            gl.uniform1f(locs.u_palette_phase, this.state.palettePhase);
+            gl.uniform1i(locs.u_interior_mode, this.state.interiorMode);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            gl.bindVertexArray(null);
+        } else {
+            const program = useDouble ? this.programDouble : this.programSingle;
+            const locs = useDouble ? this.locationsDouble : this.locationsSingle;
+
+            gl.useProgram(program);
+            gl.bindVertexArray(this.quadVao);
+
+            gl.uniform2f(locs.u_resolution, width, height);
+            gl.uniform1i(locs.u_max_iterations, effectiveIter);
+            gl.uniform1i(locs.u_fractal_type, this.state.fractalType);
+            gl.uniform2f(locs.u_julia_c, this.state.juliaC[0], this.state.juliaC[1]);
+
+            // Palettes
+            const pal = this.state.palette;
+            gl.uniform3fv(locs.u_palette_a, pal.a);
+            gl.uniform3fv(locs.u_palette_b, pal.b);
+            gl.uniform3fv(locs.u_palette_c, pal.c);
+            gl.uniform3fv(locs.u_palette_d, pal.d);
+            gl.uniform1f(locs.u_palette_freq, this.state.paletteFreq);
+            gl.uniform1f(locs.u_palette_phase, this.state.palettePhase);
+            gl.uniform1i(locs.u_interior_mode, this.state.interiorMode);
+
+            if (useDouble) {
+                const [cxHi, cxLo] = splitFloat(this.state.centerX);
+                const [cyHi, cyLo] = splitFloat(this.state.centerY);
+                gl.uniform2f(locs.u_center_hi, cxHi, cyHi);
+                gl.uniform2f(locs.u_center_lo, cxLo, cyLo);
+
+                const [sxHi, sxLo] = splitFloat(scaleVal);
+                const [syHi, syLo] = splitFloat(scaleVal);
+                gl.uniform2f(locs.u_scale_hi, sxHi, syHi);
+                gl.uniform2f(locs.u_scale_lo, sxLo, syLo);
+            } else {
+                gl.uniform2f(locs.u_center, this.state.centerX, this.state.centerY);
+                gl.uniform2f(locs.u_scale, scaleVal, scaleVal);
+            }
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            gl.bindVertexArray(null);
+        }
 
         // Update Minimap viewfinder
         if (this.minimap && this.state.fractalType === 0) {
@@ -458,8 +654,9 @@ export class MandelbrotApp {
         }
 
         if (hudPrecision) {
-            const isDbl = this.isUsingDoublePrecision();
-            hudPrecision.textContent = isDbl ? 'FP64 (Double)' : 'FP32 (Fast)';
+            const isPerturb = this.isUsingPerturbation();
+            const isDbl = isPerturb || this.isUsingDoublePrecision();
+            hudPrecision.textContent = isPerturb ? 'FP64 (Perturbation)' : (isDbl ? 'FP64 (Double)' : 'FP32 (Fast)');
             hudPrecision.className = isDbl ? 'hud-badge badge-fp64' : 'hud-badge badge-fp32';
         }
     }
@@ -1028,61 +1225,24 @@ export class MandelbrotApp {
             targetH = 2160;
         }
 
-        // Create offscreen rendering canvas
-        const offCanvas = document.createElement('canvas');
-        offCanvas.width = targetW;
-        offCanvas.height = targetH;
-        const offGL = offCanvas.getContext('webgl2', { preserveDrawingBuffer: true });
+        const originalW = this.canvas.width;
+        const originalH = this.canvas.height;
 
-        if (!offGL) {
-            // Fallback to direct current canvas capture
-            this.downloadCanvas(this.canvas);
-            return;
+        if (targetW !== originalW || targetH !== originalH) {
+            this.canvas.width = targetW;
+            this.canvas.height = targetH;
+            this.gl.viewport(0, 0, targetW, targetH);
         }
 
-        const useDouble = this.isUsingDoublePrecision();
-        const program = createProgram(offGL, VERTEX_SHADER, useDouble ? FRAGMENT_SHADER_DOUBLE : FRAGMENT_SHADER_SINGLE);
-        const locs = this.cacheUniformLocations(program, useDouble);
-        const quadVao = setupQuad(offGL);
+        this.render();
+        this.downloadCanvas(this.canvas);
 
-        offGL.viewport(0, 0, targetW, targetH);
-        offGL.useProgram(program);
-        offGL.bindVertexArray(quadVao);
-
-        offGL.uniform2f(locs.u_resolution, targetW, targetH);
-        offGL.uniform1i(locs.u_max_iterations, Math.max(500, this.getEffectiveIterations()));
-        offGL.uniform1i(locs.u_fractal_type, this.state.fractalType);
-        offGL.uniform2f(locs.u_julia_c, this.state.juliaC[0], this.state.juliaC[1]);
-
-        const pal = this.state.palette;
-        offGL.uniform3fv(locs.u_palette_a, pal.a);
-        offGL.uniform3fv(locs.u_palette_b, pal.b);
-        offGL.uniform3fv(locs.u_palette_c, pal.c);
-        offGL.uniform3fv(locs.u_palette_d, pal.d);
-        offGL.uniform1f(locs.u_palette_freq, this.state.paletteFreq);
-        offGL.uniform1f(locs.u_palette_phase, this.state.palettePhase);
-        offGL.uniform1i(locs.u_interior_mode, this.state.interiorMode);
-
-        const scaleVal = 3.0 / this.state.zoom;
-        if (useDouble) {
-            const [cxHi, cxLo] = splitFloat(this.state.centerX);
-            const [cyHi, cyLo] = splitFloat(this.state.centerY);
-            offGL.uniform2f(locs.u_center_hi, cxHi, cyHi);
-            offGL.uniform2f(locs.u_center_lo, cxLo, cyLo);
-            const [sxHi, sxLo] = splitFloat(scaleVal);
-            const [syHi, syLo] = splitFloat(scaleVal);
-            offGL.uniform2f(locs.u_scale_hi, sxHi, syHi);
-            offGL.uniform2f(locs.u_scale_lo, sxLo, syLo);
-        } else {
-            offGL.uniform2f(locs.u_center, this.state.centerX, this.state.centerY);
-            offGL.uniform2f(locs.u_scale, scaleVal, scaleVal);
+        if (targetW !== originalW || targetH !== originalH) {
+            this.canvas.width = originalW;
+            this.canvas.height = originalH;
+            this.gl.viewport(0, 0, originalW, originalH);
+            this.render();
         }
-
-        offGL.drawArrays(offGL.TRIANGLES, 0, 6);
-        this.downloadCanvas(offCanvas);
-
-        // Clean up
-        offGL.deleteProgram(program);
     }
 
     downloadCanvas(targetCanvas) {
