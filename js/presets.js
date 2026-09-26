@@ -153,17 +153,17 @@ export const PRESETS = [
     },
     {
         id: 'fp106_needle_minibrot',
-        name: 'Needle Satellite Brot (3.81e20 Zoom)',
+        name: 'Needle Satellite Brot (1.00e12 Zoom)',
         category: 'Ultra-Deep (FP106)',
         type: 0,
-        centerX: -0.6418858965635481,
-        centerY: 0.0000000860930859,
-        centerX_str: '-0.64188589656354808793146967261',
-        centerY_str: '0.0000000860930859117602508121328612544',
-        zoom: 3.81e20,
-        iterations: 3200,
-        paletteId: 'cosmic',
-        description: 'Flawless satellite minibrot suspended on a 10^-20 filament needle'
+        centerX: -1.74975614995,
+        centerY: 0.0,
+        centerX_str: '-1.74975614995000000000000000000',
+        centerY_str: '0.00000000000000000000000000000',
+        zoom: 1.0e12,
+        iterations: 2000,
+        paletteId: 'fire',
+        description: 'Cross-shaped satellite minibrot embedded along the ultra-fine real antenna'
     },
     {
         id: 'fp106_dumbbell_nebula',
@@ -175,7 +175,7 @@ export const PRESETS = [
         centerX_str: '0.365441237406898537275634464919826944709',
         centerY_str: '0.3627982558619870213261499227436402711285',
         zoom: 3.55e28,
-        iterations: 3000,
+        iterations: 4000,
         paletteId: 'rainbow',
         description: 'The absolute outer limit of Double-Double precision: 3.55 × 10^28x magnification'
     },

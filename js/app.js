@@ -1,7 +1,7 @@
 // Main Application Controller for Interactive Mandelbrot Fractal Explorer
 import { PALETTES, getPalette } from './palettes.js';
 import { PRESETS } from './presets.js';
-import { VERTEX_SHADER, FRAGMENT_SHADER_SINGLE, FRAGMENT_SHADER_DOUBLE, FRAGMENT_SHADER_PERTURBATION } from './shaders.js';
+import { VERTEX_SHADER, FRAGMENT_SHADER_SINGLE, FRAGMENT_SHADER_DOUBLE, FRAGMENT_SHADER_PERTURBATION, FRAGMENT_BLIT_PALETTE } from './shaders.js';
 import { createProgram, setupQuad, splitFloat } from './webgl-utils.js';
 import { Minimap } from './minimap.js';
 import { PipJulia } from './pip-julia.js';
@@ -41,6 +41,13 @@ export class MandelbrotApp {
             interiorMode: 1, // 0: black, 1: glow, 2: stripes
             dpr: Math.min(window.devicePixelRatio || 1, 2)
         };
+
+        // 2-Pass FBO State
+        this.fractalFbo = null;
+        this.fractalTexture = null;
+        this.fractalTextureValid = false;
+        this.fboWidth = 0;
+        this.fboHeight = 0;
 
         // Animation / Rendering timing
         this.animating = false;
@@ -85,6 +92,11 @@ export class MandelbrotApp {
         this.startLoop();
     }
 
+    invalidateFractal() {
+        this.fractalTextureValid = false;
+        this.needsRender = true;
+    }
+
     handleNoWebGL() {
         const modal = document.getElementById('fallbackModal');
         if (modal) modal.classList.remove('hidden');
@@ -110,12 +122,16 @@ export class MandelbrotApp {
 
         this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
         this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
+        this.invalidateFractal();
     }
 
     initWebGL() {
         const gl = this.gl;
 
-        // Compile single-precision, double-precision, and perturbation programs
+        // Ensure floating point render buffers are supported for 2-pass FBO
+        gl.getExtension('EXT_color_buffer_float');
+
+        // Compile single-precision, double-precision, perturbation, and blit palette programs
         try {
             this.programSingle = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER_SINGLE);
             this.locationsSingle = this.cacheUniformLocations(this.programSingle, false);
@@ -125,6 +141,9 @@ export class MandelbrotApp {
 
             this.programPerturbation = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER_PERTURBATION);
             this.locationsPerturbation = this.cachePerturbationLocations(this.programPerturbation);
+
+            this.programBlit = createProgram(gl, VERTEX_SHADER, FRAGMENT_BLIT_PALETTE);
+            this.locationsBlit = this.cacheBlitLocations(this.programBlit);
         } catch (e) {
             console.error('Shader initialization failed:', e);
             alert('Shader compilation error: ' + e.message);
@@ -143,8 +162,47 @@ export class MandelbrotApp {
         this.refOrbitData = new Float32Array(4096 * 2);
         this.refOrbitCache = null;
 
+        // Initialize 2-Pass FBO
+        this.fractalFbo = gl.createFramebuffer();
+        this.fractalTexture = gl.createTexture();
+        this.fractalTextureValid = false;
+
         this.quadVao = setupQuad(gl);
         this.resize();
+    }
+
+    initFBO(w, h) {
+        const gl = this.gl;
+        if (this.fboWidth === w && this.fboHeight === h && this.fractalTexture) return;
+        this.fboWidth = w;
+        this.fboHeight = h;
+
+        gl.bindTexture(gl.TEXTURE_2D, this.fractalTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fractalFbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.fractalTexture, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        this.fractalTextureValid = false;
+    }
+
+    cacheBlitLocations(program) {
+        const gl = this.gl;
+        return {
+            u_fractal_texture: gl.getUniformLocation(program, 'u_fractal_texture'),
+            u_palette_a: gl.getUniformLocation(program, 'u_palette_a'),
+            u_palette_b: gl.getUniformLocation(program, 'u_palette_b'),
+            u_palette_c: gl.getUniformLocation(program, 'u_palette_c'),
+            u_palette_d: gl.getUniformLocation(program, 'u_palette_d'),
+            u_palette_freq: gl.getUniformLocation(program, 'u_palette_freq'),
+            u_palette_phase: gl.getUniformLocation(program, 'u_palette_phase'),
+            u_interior_mode: gl.getUniformLocation(program, 'u_interior_mode')
+        };
     }
 
     cacheUniformLocations(program, isDouble) {
@@ -154,12 +212,6 @@ export class MandelbrotApp {
             u_max_iterations: gl.getUniformLocation(program, 'u_max_iterations'),
             u_fractal_type: gl.getUniformLocation(program, 'u_fractal_type'),
             u_julia_c: gl.getUniformLocation(program, 'u_julia_c'),
-            u_palette_a: gl.getUniformLocation(program, 'u_palette_a'),
-            u_palette_b: gl.getUniformLocation(program, 'u_palette_b'),
-            u_palette_c: gl.getUniformLocation(program, 'u_palette_c'),
-            u_palette_d: gl.getUniformLocation(program, 'u_palette_d'),
-            u_palette_freq: gl.getUniformLocation(program, 'u_palette_freq'),
-            u_palette_phase: gl.getUniformLocation(program, 'u_palette_phase'),
             u_interior_mode: gl.getUniformLocation(program, 'u_interior_mode')
         };
 
@@ -188,13 +240,10 @@ export class MandelbrotApp {
             u_fractal_type: gl.getUniformLocation(program, 'u_fractal_type'),
             u_julia_c: gl.getUniformLocation(program, 'u_julia_c'),
             u_refOrbit: gl.getUniformLocation(program, 'u_refOrbit'),
-            u_palette_a: gl.getUniformLocation(program, 'u_palette_a'),
-            u_palette_b: gl.getUniformLocation(program, 'u_palette_b'),
-            u_palette_c: gl.getUniformLocation(program, 'u_palette_c'),
-            u_palette_d: gl.getUniformLocation(program, 'u_palette_d'),
-            u_palette_freq: gl.getUniformLocation(program, 'u_palette_freq'),
-            u_palette_phase: gl.getUniformLocation(program, 'u_palette_phase'),
-            u_interior_mode: gl.getUniformLocation(program, 'u_interior_mode')
+            u_interior_mode: gl.getUniformLocation(program, 'u_interior_mode'),
+            u_skip_iterations: gl.getUniformLocation(program, 'u_skip_iterations'),
+            u_series_A: gl.getUniformLocation(program, 'u_series_A'),
+            u_series_B: gl.getUniformLocation(program, 'u_series_B')
         };
     }
 
@@ -211,24 +260,24 @@ export class MandelbrotApp {
         const juliaC = this.state.juliaC;
         const isDD = zoom >= 1e13;
 
-        const evalEscape = (x, y) => {
+        const evalEscape = (x, y, limit = maxIter) => {
             let zx = 0.0, zy = 0.0;
             let cConstX = x, cConstY = y;
             if (fractalType === 1) {
                 zx = x; zy = y;
                 cConstX = juliaC[0]; cConstY = juliaC[1];
             }
-            for (let i = 0; i < maxIter; i++) {
+            for (let i = 0; i < limit; i++) {
                 const x2 = zx * zx, y2 = zy * zy;
                 if (x2 + y2 > 64.0) return i;
                 const newZy = 2.0 * zx * zy + cConstY;
                 zx = x2 - y2 + cConstX;
                 zy = newZy;
             }
-            return maxIter;
+            return limit;
         };
 
-        const evalEscapeDD = (cx_h, cx_l, cy_h, cy_l) => {
+        const evalEscapeDD = (cx_h, cx_l, cy_h, cy_l, limit = maxIter) => {
             let zx_h = 0.0, zx_l = 0.0;
             let zy_h = 0.0, zy_l = 0.0;
             let ccx_h = cx_h, ccx_l = cx_l;
@@ -239,7 +288,7 @@ export class MandelbrotApp {
                 ccx_h = juliaC[0]; ccx_l = 0.0;
                 ccy_h = juliaC[1]; ccy_l = 0.0;
             }
-            for (let i = 0; i < maxIter; i++) {
+            for (let i = 0; i < limit; i++) {
                 const [x2_h, x2_l] = dd_sqr(zx_h, zx_l);
                 const [y2_h, y2_l] = dd_sqr(zy_h, zy_l);
                 if (x2_h + y2_h > 64.0) return i;
@@ -250,7 +299,7 @@ export class MandelbrotApp {
                 zx_h = newZx_h; zx_l = newZx_l;
                 zy_h = newZy_h; zy_l = newZy_l;
             }
-            return maxIter;
+            return limit;
         };
 
         let refDD_x = [...cxDD];
@@ -259,52 +308,65 @@ export class MandelbrotApp {
         let refY = cy;
         let bestIter = isDD ? evalEscapeDD(cxDD[0], cxDD[1], cyDD[0], cyDD[1]) : evalEscape(cx, cy);
 
-        // If center escapes early and not maxIter, probe nearby points in the view
-        if (bestIter < maxIter) {
-            const cached = this.refOrbitCache;
-            if (cached && cached.fractalType === fractalType && cached.refLen > bestIter) {
-                const dx = isDD ? Math.abs(dd_sub(cached.refDD_x[0], cached.refDD_x[1], cxDD[0], cxDD[1])[0]) : Math.abs(cached.refX - cx);
-                const dy = isDD ? Math.abs(dd_sub(cached.refDD_y[0], cached.refDD_y[1], cyDD[0], cyDD[1])[0]) : Math.abs(cached.refY - cy);
-                if (dx < scale * 0.7 && dy < scale * 0.7) {
-                    refX = cached.refX;
-                    refY = cached.refY;
-                    if (isDD && cached.refDD_x) {
-                        refDD_x = [...cached.refDD_x];
-                        refDD_y = [...cached.refDD_y];
+        // Check if cached orbit can be reused (within perturbation radius)
+        const cached = this.refOrbitCache;
+        let canReuseCached = false;
+        if (cached && cached.fractalType === fractalType && cached.refLen > 500) {
+            const dx = isDD ? Math.abs(dd_sub(cached.refDD_x[0], cached.refDD_x[1], cxDD[0], cxDD[1])[0]) : Math.abs(cached.refX - cx);
+            const dy = isDD ? Math.abs(dd_sub(cached.refDD_y[0], cached.refDD_y[1], cyDD[0], cyDD[1])[0]) : Math.abs(cached.refY - cy);
+            if (dx < scale * 0.9 && dy < scale * 0.9) {
+                refX = cached.refX;
+                refY = cached.refY;
+                if (isDD && cached.refDD_x) {
+                    refDD_x = [...cached.refDD_x];
+                    refDD_y = [...cached.refDD_y];
+                }
+                bestIter = cached.refLen;
+                canReuseCached = true;
+            }
+        }
+
+        // If center escapes early and we cannot reuse cache, search candidate points using 2-stage probe
+        if (!canReuseCached && bestIter < maxIter) {
+            const probeLimit = Math.min(250, maxIter);
+            let bestProbeIter = bestIter;
+            let bestCandidate = null;
+
+            for (let dy = -2; dy <= 2; dy++) {
+                for (let dx = -2; dx <= 2; dx++) {
+                    if (dx === 0 && dy === 0) continue;
+                    if (isDD) {
+                        const pxDD = dd_add(cxDD[0], cxDD[1], (dx / 4) * scale, 0.0);
+                        const pyDD = dd_add(cyDD[0], cyDD[1], (dy / 4) * scale, 0.0);
+                        const it = evalEscapeDD(pxDD[0], pxDD[1], pyDD[0], pyDD[1], probeLimit);
+                        if (it > bestProbeIter) {
+                            bestProbeIter = it;
+                            bestCandidate = { pxDD, pyDD, px: pxDD[0] + pxDD[1], py: pyDD[0] + pyDD[1] };
+                        }
+                    } else {
+                        const px = cx + (dx / 4) * scale;
+                        const py = cy + (dy / 4) * scale;
+                        const it = evalEscape(px, py, probeLimit);
+                        if (it > bestProbeIter) {
+                            bestProbeIter = it;
+                            bestCandidate = { px, py };
+                        }
                     }
-                    bestIter = cached.refLen;
                 }
             }
 
-            if (bestIter < maxIter) {
-                for (let dy = -2; dy <= 2; dy++) {
-                    for (let dx = -2; dx <= 2; dx++) {
-                        if (dx === 0 && dy === 0) continue;
-                        if (isDD) {
-                            const pxDD = dd_add(cxDD[0], cxDD[1], (dx / 4) * scale, 0.0);
-                            const pyDD = dd_add(cyDD[0], cyDD[1], (dy / 4) * scale, 0.0);
-                            const it = evalEscapeDD(pxDD[0], pxDD[1], pyDD[0], pyDD[1]);
-                            if (it > bestIter) {
-                                bestIter = it;
-                                refDD_x = pxDD;
-                                refDD_y = pyDD;
-                                refX = pxDD[0] + pxDD[1];
-                                refY = pyDD[0] + pyDD[1];
-                                if (bestIter >= maxIter) break;
-                            }
-                        } else {
-                            const px = cx + (dx / 4) * scale;
-                            const py = cy + (dy / 4) * scale;
-                            const it = evalEscape(px, py);
-                            if (it > bestIter) {
-                                bestIter = it;
-                                refX = px;
-                                refY = py;
-                                if (bestIter >= maxIter) break;
-                            }
-                        }
-                    }
-                    if (bestIter >= maxIter) break;
+            // Stage 2: Evaluate winning candidate up to full maxIter
+            if (bestCandidate) {
+                if (isDD) {
+                    refDD_x = bestCandidate.pxDD;
+                    refDD_y = bestCandidate.pyDD;
+                    refX = bestCandidate.px;
+                    refY = bestCandidate.py;
+                    bestIter = evalEscapeDD(refDD_x[0], refDD_x[1], refDD_y[0], refDD_y[1], maxIter);
+                } else {
+                    refX = bestCandidate.px;
+                    refY = bestCandidate.py;
+                    bestIter = evalEscape(refX, refY, maxIter);
                 }
             }
         }
@@ -402,6 +464,58 @@ export class MandelbrotApp {
             dcBaseY = cy - refY;
         }
 
+        // Bivariate Series Approximation (Taylor Polynomial Fast-Forwarding)
+        let skipIter = 0;
+        let seriesA = [0.0, 0.0];
+        let seriesB = [0.0, 0.0];
+
+        if (fractalType === 0 || fractalType === 1) {
+            let Ax = fractalType === 1 ? 1.0 : 0.0;
+            let Ay = 0.0;
+            let Bx = 0.0;
+            let By = 0.0;
+            const maxRadius = scale * 1.5;
+
+            for (let n = 0; n < actualLen - 5; n++) {
+                const Zx = refData[n * 2];
+                const Zy = refData[n * 2 + 1];
+
+                const magA = Math.hypot(Ax, Ay);
+                const magB = Math.hypot(Bx, By);
+                const linearDisp = magA * maxRadius;
+                const quadDisp = magB * maxRadius * maxRadius;
+
+                if (Zx * Zx + Zy * Zy > 4.0 || linearDisp > 0.5 || quadDisp > 0.1 * (linearDisp + 1e-12) || magB * maxRadius > 0.1) {
+                    break;
+                }
+
+                skipIter = n;
+                seriesA = [Ax, Ay];
+                seriesB = [Bx, By];
+
+                const two_ZA_x = 2.0 * (Zx * Ax - Zy * Ay);
+                const two_ZA_y = 2.0 * (Zx * Ay + Zy * Ax);
+                const nextAx = two_ZA_x + (fractalType === 0 ? 1.0 : 0.0);
+                const nextAy = two_ZA_y;
+
+                const two_ZB_x = 2.0 * (Zx * Bx - Zy * By);
+                const two_ZB_y = 2.0 * (Zx * By + Zy * Bx);
+                const A2_x = Ax * Ax - Ay * Ay;
+                const A2_y = 2.0 * Ax * Ay;
+                const nextBx = two_ZB_x + A2_x;
+                const nextBy = two_ZB_y + A2_y;
+
+                if (!isFinite(nextAx) || !isFinite(nextBx) || Math.abs(nextAx) > 1e20 || Math.abs(nextBx) > 1e35) {
+                    break;
+                }
+
+                Ax = nextAx;
+                Ay = nextAy;
+                Bx = nextBx;
+                By = nextBy;
+            }
+        }
+
         this.refOrbitCache = {
             refX,
             refY,
@@ -415,7 +529,7 @@ export class MandelbrotApp {
             maxIter
         };
 
-        return { refX, refY, refLen: actualLen, dcBaseX, dcBaseY };
+        return { refX, refY, refLen: actualLen, dcBaseX, dcBaseY, skipIter, seriesA, seriesB };
     }
 
     initSubsystems() {
@@ -446,7 +560,8 @@ export class MandelbrotApp {
             this.canvas.width = displayWidth;
             this.canvas.height = displayHeight;
             this.gl.viewport(0, 0, displayWidth, displayHeight);
-            this.needsRender = true;
+            this.initFBO(displayWidth, displayHeight);
+            this.invalidateFractal();
         }
     }
 
@@ -475,19 +590,21 @@ export class MandelbrotApp {
         return this.isUsingDoublePrecision();
     }
 
-    render() {
+    renderFractalToFBO() {
         const gl = this.gl;
         const width = this.canvas.width;
         const height = this.canvas.height;
-        const minDim = Math.min(width, height);
         const scaleVal = 3.0 / this.state.zoom;
         const effectiveIter = this.getEffectiveIterations();
 
         const usePerturb = this.isUsingPerturbation();
         const useDouble = !usePerturb && this.isUsingDoublePrecision();
 
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fractalFbo);
+        gl.viewport(0, 0, width, height);
+
         if (usePerturb) {
-            const { refLen, dcBaseX, dcBaseY } = this.computeReferenceOrbit(effectiveIter);
+            const { refLen, dcBaseX, dcBaseY, skipIter, seriesA, seriesB } = this.computeReferenceOrbit(effectiveIter);
             const locs = this.locationsPerturbation;
 
             gl.useProgram(this.programPerturbation);
@@ -502,20 +619,15 @@ export class MandelbrotApp {
 
             gl.uniform1i(locs.u_fractal_type, this.state.fractalType);
             gl.uniform2f(locs.u_julia_c, this.state.juliaC[0], this.state.juliaC[1]);
+            gl.uniform1i(locs.u_interior_mode, this.state.interiorMode);
+
+            gl.uniform1i(locs.u_skip_iterations, skipIter);
+            gl.uniform2f(locs.u_series_A, seriesA[0], seriesA[1]);
+            gl.uniform2f(locs.u_series_B, seriesB[0], seriesB[1]);
 
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, this.refOrbitTexture);
             gl.uniform1i(locs.u_refOrbit, 0);
-
-            // Palettes
-            const pal = this.state.palette;
-            gl.uniform3fv(locs.u_palette_a, pal.a);
-            gl.uniform3fv(locs.u_palette_b, pal.b);
-            gl.uniform3fv(locs.u_palette_c, pal.c);
-            gl.uniform3fv(locs.u_palette_d, pal.d);
-            gl.uniform1f(locs.u_palette_freq, this.state.paletteFreq);
-            gl.uniform1f(locs.u_palette_phase, this.state.palettePhase);
-            gl.uniform1i(locs.u_interior_mode, this.state.interiorMode);
 
             gl.drawArrays(gl.TRIANGLES, 0, 6);
             gl.bindVertexArray(null);
@@ -530,15 +642,6 @@ export class MandelbrotApp {
             gl.uniform1i(locs.u_max_iterations, effectiveIter);
             gl.uniform1i(locs.u_fractal_type, this.state.fractalType);
             gl.uniform2f(locs.u_julia_c, this.state.juliaC[0], this.state.juliaC[1]);
-
-            // Palettes
-            const pal = this.state.palette;
-            gl.uniform3fv(locs.u_palette_a, pal.a);
-            gl.uniform3fv(locs.u_palette_b, pal.b);
-            gl.uniform3fv(locs.u_palette_c, pal.c);
-            gl.uniform3fv(locs.u_palette_d, pal.d);
-            gl.uniform1f(locs.u_palette_freq, this.state.paletteFreq);
-            gl.uniform1f(locs.u_palette_phase, this.state.palettePhase);
             gl.uniform1i(locs.u_interior_mode, this.state.interiorMode);
 
             if (useDouble) {
@@ -560,11 +663,47 @@ export class MandelbrotApp {
             gl.bindVertexArray(null);
         }
 
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        this.fractalTextureValid = true;
+
         // Update Minimap viewfinder
         if (this.minimap && this.state.fractalType === 0) {
             this.minimap.updateViewport(this.state, width / height);
         }
+    }
 
+    renderBlitPalette() {
+        const gl = this.gl;
+        const width = this.canvas.width;
+        const height = this.canvas.height;
+        const locs = this.locationsBlit;
+
+        gl.viewport(0, 0, width, height);
+        gl.useProgram(this.programBlit);
+        gl.bindVertexArray(this.quadVao);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.fractalTexture);
+        gl.uniform1i(locs.u_fractal_texture, 0);
+
+        const pal = this.state.palette;
+        gl.uniform3fv(locs.u_palette_a, pal.a);
+        gl.uniform3fv(locs.u_palette_b, pal.b);
+        gl.uniform3fv(locs.u_palette_c, pal.c);
+        gl.uniform3fv(locs.u_palette_d, pal.d);
+        gl.uniform1f(locs.u_palette_freq, this.state.paletteFreq);
+        gl.uniform1f(locs.u_palette_phase, this.state.palettePhase);
+        gl.uniform1i(locs.u_interior_mode, this.state.interiorMode);
+
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        gl.bindVertexArray(null);
+    }
+
+    render(forceCompute = false) {
+        if (forceCompute || !this.fractalTextureValid) {
+            this.renderFractalToFBO();
+        }
+        this.renderBlitPalette();
         this.updateHUD();
         this.needsRender = false;
     }
@@ -609,7 +748,7 @@ export class MandelbrotApp {
                 const logTo = Math.log(anim.toZoom);
                 this.state.zoom = Math.exp(logFrom + (logTo - logFrom) * ease);
 
-                this.needsRender = true;
+                this.invalidateFractal();
 
                 if (t >= 1.0) {
                     this.cameraAnimation = null;
@@ -631,7 +770,7 @@ export class MandelbrotApp {
 
                 this.momentum.vx *= 0.90;
                 this.momentum.vy *= 0.90;
-                this.needsRender = true;
+                this.invalidateFractal();
 
                 if (Math.abs(this.momentum.vx) <= 0.0001 && Math.abs(this.momentum.vy) <= 0.0001) {
                     this.momentum.vx = 0;
@@ -640,10 +779,10 @@ export class MandelbrotApp {
                 }
             }
 
-            // Dynamic color cycling animation
+            // Dynamic color cycling animation (lightning fast: only re-blits palette pass)
             if (this.state.animateColor) {
                 this.state.palettePhase = (this.state.palettePhase + this.state.colorSpeed) % 1.0;
-                this.needsRender = true;
+                this.renderBlitPalette();
             }
 
             if (this.needsRender) {
@@ -707,7 +846,7 @@ export class MandelbrotApp {
             startTime: performance.now(),
             duration: Math.max(300, duration)
         };
-        this.needsRender = true;
+        this.invalidateFractal();
     }
 
     zoomAtPoint(screenX, screenY, factor) {
@@ -733,7 +872,7 @@ export class MandelbrotApp {
         this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
         this.state.zoom = newZoom;
 
-        this.needsRender = true;
+        this.invalidateFractal();
         this.debounceSyncHash();
     }
 
@@ -764,7 +903,7 @@ export class MandelbrotApp {
             document.getElementById('modeReturnBrot')?.classList.add('hidden');
         }
 
-        this.needsRender = true;
+        this.invalidateFractal();
         this.syncToHash();
     }
 
@@ -923,7 +1062,7 @@ export class MandelbrotApp {
                 this.lastPointerPos = { x: e.clientX, y: e.clientY };
                 this.lastPointerTime = now;
 
-                this.needsRender = true;
+                this.invalidateFractal();
             } else {
                 // Mouse hover updates live Julia preview
                 if (this.state.fractalType === 0 && this.pipJulia && this.pipJulia.visible) {
@@ -1016,7 +1155,7 @@ export class MandelbrotApp {
                 this.state.centerDD_y = dd_add(this.centerAtDragStartDD_y[0], this.centerAtDragStartDD_y[1], deltaY, 0.0);
                 this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
                 this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
-                this.needsRender = true;
+                this.invalidateFractal();
             } else if (this.activePointers.size === 2 && this.initialPinchDistance > 0) {
                 const [t1, t2] = [e.touches[0], e.touches[1]];
                 const currentDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
@@ -1060,21 +1199,21 @@ export class MandelbrotApp {
                 case 'A':
                     this.state.centerDD_x = dd_sub(this.state.centerDD_x[0], this.state.centerDD_x[1], step, 0.0);
                     this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
-                    this.needsRender = true;
+                    this.invalidateFractal();
                     break;
                 case 'ArrowRight':
                 case 'd':
                 case 'D':
                     this.state.centerDD_x = dd_add(this.state.centerDD_x[0], this.state.centerDD_x[1], step, 0.0);
                     this.state.centerX = this.state.centerDD_x[0] + this.state.centerDD_x[1];
-                    this.needsRender = true;
+                    this.invalidateFractal();
                     break;
                 case 'ArrowUp':
                 case 'w':
                 case 'W':
                     this.state.centerDD_y = dd_add(this.state.centerDD_y[0], this.state.centerDD_y[1], step, 0.0);
                     this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
-                    this.needsRender = true;
+                    this.invalidateFractal();
                     break;
                 case 'ArrowDown':
                 case 's':
@@ -1086,7 +1225,7 @@ export class MandelbrotApp {
                     }
                     this.state.centerDD_y = dd_sub(this.state.centerDD_y[0], this.state.centerDD_y[1], step, 0.0);
                     this.state.centerY = this.state.centerDD_y[0] + this.state.centerDD_y[1];
-                    this.needsRender = true;
+                    this.invalidateFractal();
                     break;
                 case '+':
                 case '=':
@@ -1321,7 +1460,7 @@ export class MandelbrotApp {
             iterSlider.addEventListener('input', (e) => {
                 this.state.maxIterations = parseInt(e.target.value, 10);
                 if (iterValue) iterValue.textContent = this.state.maxIterations;
-                this.needsRender = true;
+                this.invalidateFractal();
             });
         }
 
@@ -1331,7 +1470,7 @@ export class MandelbrotApp {
             autoIterToggle.checked = this.state.autoIterations;
             autoIterToggle.addEventListener('change', (e) => {
                 this.state.autoIterations = e.target.checked;
-                this.needsRender = true;
+                this.invalidateFractal();
             });
         }
 
@@ -1361,7 +1500,7 @@ export class MandelbrotApp {
             interiorSelect.value = String(this.state.interiorMode);
             interiorSelect.addEventListener('change', (e) => {
                 this.state.interiorMode = parseInt(e.target.value, 10);
-                this.needsRender = true;
+                this.invalidateFractal();
             });
         }
 
@@ -1371,7 +1510,7 @@ export class MandelbrotApp {
             precSelect.value = this.state.precisionMode;
             precSelect.addEventListener('change', (e) => {
                 this.state.precisionMode = e.target.value;
-                this.needsRender = true;
+                this.invalidateFractal();
             });
         }
 
@@ -1480,17 +1619,17 @@ export class MandelbrotApp {
         if (targetW !== originalW || targetH !== originalH) {
             this.canvas.width = targetW;
             this.canvas.height = targetH;
-            this.gl.viewport(0, 0, targetW, targetH);
+            this.initFBO(targetW, targetH);
         }
 
-        this.render();
+        this.render(true);
         this.downloadCanvas(this.canvas);
 
         if (targetW !== originalW || targetH !== originalH) {
             this.canvas.width = originalW;
             this.canvas.height = originalH;
-            this.gl.viewport(0, 0, originalW, originalH);
-            this.render();
+            this.initFBO(originalW, originalH);
+            this.render(true);
         }
     }
 
