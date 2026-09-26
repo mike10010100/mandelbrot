@@ -633,8 +633,9 @@ export class MandelbrotApp {
         const hudPrecision = document.getElementById('hudPrecision');
 
         if (hudCoords) {
-            const rx = this.state.centerX >= 0 ? `+${this.state.centerX.toFixed(12)}` : this.state.centerX.toFixed(12);
-            const ry = this.state.centerY >= 0 ? `+${this.state.centerY.toFixed(12)}i` : `${this.state.centerY.toFixed(12)}i`;
+            const prec = Math.min(16, Math.max(8, Math.ceil(Math.log10(Math.max(1, this.state.zoom))) + 3));
+            const rx = this.state.centerX >= 0 ? `+${this.state.centerX.toFixed(prec)}` : this.state.centerX.toFixed(prec);
+            const ry = this.state.centerY >= 0 ? `+${this.state.centerY.toFixed(prec)}i` : `${this.state.centerY.toFixed(prec)}i`;
             hudCoords.textContent = `${rx}, ${ry}`;
         }
 
@@ -1270,9 +1271,10 @@ export class MandelbrotApp {
 
     syncToHash() {
         const params = new URLSearchParams();
-        params.set('x', this.state.centerX.toFixed(12));
-        params.set('y', this.state.centerY.toFixed(12));
-        params.set('z', this.state.zoom.toFixed(4));
+        const prec = Math.min(16, Math.max(8, Math.ceil(Math.log10(Math.max(1, this.state.zoom))) + 3));
+        params.set('x', this.state.centerX.toFixed(prec));
+        params.set('y', this.state.centerY.toFixed(prec));
+        params.set('z', this.state.zoom >= 1e6 ? this.state.zoom.toExponential(4) : this.state.zoom.toFixed(4));
         params.set('iter', this.state.maxIterations);
         params.set('pal', this.state.palette.id);
         params.set('type', this.state.fractalType);
